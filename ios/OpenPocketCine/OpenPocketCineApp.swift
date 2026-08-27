@@ -2,6 +2,8 @@ import SwiftUI
 
 @main
 struct OpenPocketCineApp: App {
+    @UIApplicationDelegateAdaptor(OpenPocketCineAppDelegate.self) private var appDelegate
+
     var body: some Scene {
         WindowGroup {
             AppRoot()

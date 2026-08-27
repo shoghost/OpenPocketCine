@@ -355,11 +355,15 @@ struct AppRoot: View {
         .environment(\.font, LiveType.text(16))
         .preferredColorScheme(.dark)
         .onAppear {
+            StreamingOrientationController.apply(enabled: model.streamingModeEnabled)
             model.prepareStartup()
             UIApplication.shared.isIdleTimerDisabled = model.keepScreenAwake
         }
         .onChange(of: model.keepScreenAwake) { _, awake in
             UIApplication.shared.isIdleTimerDisabled = awake
+        }
+        .onChange(of: model.streamingModeEnabled) { _, enabled in
+            StreamingOrientationController.apply(enabled: enabled)
         }
         .task {
             try? await Task.sleep(for: LaunchSplashTiming.visibleDuration)
@@ -377,6 +381,7 @@ struct AppRoot: View {
         .onChange(of: scenePhase) { _, phase in
             switch phase {
             case .active:
+                StreamingOrientationController.apply(enabled: model.streamingModeEnabled)
                 model.session.noteSceneBecameActive()
             case .inactive, .background:
                 model.session.noteSceneBecameInactive()
