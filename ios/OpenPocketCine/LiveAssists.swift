@@ -702,6 +702,7 @@ enum OperatorPrefs {
     private static let gimbalStickSensitivityKey = "OpenPocketCine.GimbalStickSensitivity"
     private static let dispLiveKey = "OpenPocketCine.DispChrome.Live"
     private static let dispCleanKey = "OpenPocketCine.DispChrome.Clean"
+    private static let streamingModeKey = "OpenPocketCine.StreamingMode"
     private static let cleanPinsKey = "OpenPocketCine.CleanViewPins.v1"
     private static let playbackAssistsKey = "OpenPocketCine.PlaybackAssists.v1"
     private static let lastMonitorColorModeKey = "OpenPocketCine.LastMonitorColorMode"
@@ -767,6 +768,11 @@ enum OperatorPrefs {
     static var dispClean: PocketDispChrome {
         get { loadChrome(key: dispCleanKey) ?? .cleanDefaults }
         set { saveChrome(newValue, key: dispCleanKey) }
+    }
+
+    static var streamingModeEnabled: Bool {
+        get { UserDefaults.standard.bool(forKey: streamingModeKey) }
+        set { UserDefaults.standard.set(newValue, forKey: streamingModeKey) }
     }
 
     static var shutterUsesAngle: Bool {

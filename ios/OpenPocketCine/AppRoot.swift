@@ -52,6 +52,10 @@ final class AppModel {
     var dispClean = OperatorPrefs.dispClean {
         didSet { OperatorPrefs.dispClean = dispClean }
     }
+    /// Full-picture streaming HUD. Independent from DISP 1/2 so their saved chrome is preserved.
+    var streamingModeEnabled = OperatorPrefs.streamingModeEnabled {
+        didSet { OperatorPrefs.streamingModeEnabled = streamingModeEnabled }
+    }
     var operatorSettingsTab: OperatorSettingsTab = .link
     /// Live-monitor Media / Settings overlay. Distinct from `homePanel` (startup cover).
     var liveOperatorPanel: LiveOperatorPanel?

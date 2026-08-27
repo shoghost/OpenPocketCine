@@ -12,6 +12,7 @@ struct LiveViewScreen: View {
     @State private var topPickerFrames: [LiveTopMenu: CGRect] = [:]
     @State private var captureTileFrames: [CaptureSheet: CGRect] = [:]
     @State private var assistIconFrames: [LiveAssistTool: CGRect] = [:]
+    @State private var streamingChromeVisible = true
 
     /// OpenZCine `DisplayChromeVisibility.cleanDefaults`: status + strips + lock off;
     /// batteries, rail (DISP / record / media / settings) stay. Lock remounts while locked.
@@ -32,21 +33,29 @@ struct LiveViewScreen: View {
             }()
             let safeArea = LiveMonitorLayout.resolvedSafeArea(
                 proxy.safeAreaInsets, scene: LiveMonitorLayout.sceneSafeArea)
-            let base = LiveMonitorLayout.fit(
-                layoutSize: proxy.size,
-                safeArea: safeArea,
-                screenSize: LiveMonitorLayout.sceneSize,
-                showsBottomBars: showsBottomBars,
-                feedAspect: LiveChromeMetrics.feedAspect,
-                pictureAspect: model.session.decoder.pictureAspect,
-                orientation: orientationObserver.orientation
-            )
-            let resolved = Self.resolvePortrait(base, model: model)
+            let viewport = LiveMonitorLayout.canvasSize(
+                layoutSize: proxy.size, safeArea: safeArea, screenSize: LiveMonitorLayout.sceneSize)
+            let streaming = model.streamingModeEnabled && viewport.width > viewport.height
+            let base = streaming
+                ? LiveMonitorLayout.streaming(viewport: viewport, safeArea: safeArea)
+                : LiveMonitorLayout.fit(
+                    layoutSize: proxy.size,
+                    safeArea: safeArea,
+                    screenSize: LiveMonitorLayout.sceneSize,
+                    showsBottomBars: showsBottomBars,
+                    feedAspect: LiveChromeMetrics.feedAspect,
+                    pictureAspect: model.session.decoder.pictureAspect,
+                    orientation: orientationObserver.orientation
+                )
+            let resolved: (layout: LiveMonitorLayout, zones: MonitorPortraitZones?) =
+                streaming
+                ? (layout: base, zones: nil)
+                : Self.resolvePortrait(base, model: model)
             let layout = resolved.layout
             Color.clear
                 .ignoresSafeArea()
                 .overlay(alignment: .topLeading) {
-                    canvas(layout, portrait: resolved.zones)
+                    canvas(layout, portrait: resolved.zones, streaming: streaming)
                         .frame(
                             width: layout.viewport.width,
                             height: layout.viewport.height,
@@ -67,6 +76,7 @@ struct LiveViewScreen: View {
         .animation(.easeOut(duration: 0.16), value: model.chromeEditorMode)
         .animation(.easeOut(duration: 0.20), value: model.session.isFocusResetAvailable)
         .animation(.easeOut(duration: 0.22), value: model.session.isFeedWarming)
+        .animation(.easeOut(duration: 0.16), value: streamingChromeVisible)
         .onAppear {
             let app = model
             orientationObserver.start()
@@ -106,6 +116,15 @@ struct LiveViewScreen: View {
                 topMenu = nil
                 model.captureSheet = nil
                 model.assist.configureTool = nil
+            }
+        }
+        .onChange(of: model.streamingModeEnabled) { _, enabled in
+            streamingChromeVisible = true
+            if enabled {
+                topMenu = nil
+                model.captureSheet = nil
+                model.assist.configureTool = nil
+                model.liveOperatorPanel = nil
             }
         }
         .sheet(isPresented: Bindable(model.assist).showLUTPicker) {
@@ -172,7 +191,11 @@ struct LiveViewScreen: View {
     }
 
     @ViewBuilder
-    private func canvas(_ layout: LiveMonitorLayout, portrait: MonitorPortraitZones?) -> some View {
+    private func canvas(
+        _ layout: LiveMonitorLayout,
+        portrait: MonitorPortraitZones?,
+        streaming: Bool
+    ) -> some View {
         ZStack(alignment: .topLeading) {
             LiveDesign.background
 
@@ -197,13 +220,15 @@ struct LiveViewScreen: View {
                 .position(x: layout.onFeed.midX, y: layout.onFeed.midY)
                 .opacity(model.session.isFeedWarming ? 0 : 1)
 
-            LiveFeedAssistsPane()
-                .frame(width: feedContentWidth, height: layout.onFeed.height)
-                .frame(width: layout.onFeed.width, height: layout.onFeed.height)
-                .clipped()
-                .position(x: layout.onFeed.midX, y: layout.onFeed.midY)
-                .opacity(model.session.isFeedWarming ? 0 : 1)
-                .allowsHitTesting(false)
+            if !streaming {
+                LiveFeedAssistsPane()
+                    .frame(width: feedContentWidth, height: layout.onFeed.height)
+                    .frame(width: layout.onFeed.width, height: layout.onFeed.height)
+                    .clipped()
+                    .position(x: layout.onFeed.midX, y: layout.onFeed.midY)
+                    .opacity(model.session.isFeedWarming ? 0 : 1)
+                    .allowsHitTesting(false)
+            }
 
             // Always mounted so the first paint is the waiting plate — an
             // insert fade used to flash the leftover IDR underneath.
@@ -221,7 +246,9 @@ struct LiveViewScreen: View {
             .opacity(model.session.isFeedWarming ? 1 : 0)
             .allowsHitTesting(false)
 
-            if let portrait {
+            if streaming {
+                streamingChrome(layout)
+            } else if let portrait {
                 portraitChrome(layout, zones: portrait)
                     .environment(\.interfaceLocked, interfaceLocked)
                     .allowsHitTesting(chromeInteractive && model.liveChromeInteractive)
@@ -232,13 +259,17 @@ struct LiveViewScreen: View {
             }
 
             // After chrome so the bezel stroke sits on the physical screen, not the feed well.
-            LiveRecordingTallyGate()
-                .frame(width: layout.viewport.width, height: layout.viewport.height)
+            if !streaming {
+                LiveRecordingTallyGate()
+                    .frame(width: layout.viewport.width, height: layout.viewport.height)
+            }
 
-            popups(layout)
-                .zIndex(10)
+            if !streaming {
+                popups(layout)
+                    .zIndex(10)
+            }
 
-            if let panel = model.liveOperatorPanel, !model.isEditingChrome {
+            if !streaming, let panel = model.liveOperatorPanel, !model.isEditingChrome {
                 operatorPanelCover(panel, layout: layout)
                     .transition(.opacity)
                     .zIndex(20)
@@ -281,6 +312,64 @@ struct LiveViewScreen: View {
         }
         .environment(\.colorScheme, .dark)
         .ignoresSafeArea()
+    }
+
+    private func streamingChrome(_ layout: LiveMonitorLayout) -> some View {
+        ZStack(alignment: .topLeading) {
+            Color.white.opacity(0.001)
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    streamingChromeVisible.toggle()
+                }
+
+            if streamingChromeVisible {
+                HStack(spacing: 10) {
+                    HStack(spacing: 7) {
+                        Circle()
+                            .fill(streamingConnectionTint)
+                            .frame(width: 7, height: 7)
+                        Text(model.session.phase.label)
+                            .font(LiveType.ui(size: 11, weight: .semibold))
+                            .foregroundStyle(LiveDesign.text)
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 7)
+                    .liveChromeCapsule()
+
+                    LiveBatteryCluster()
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 6)
+                        .liveChromeCapsule()
+
+                    Spacer(minLength: 12)
+
+                    Button {
+                        model.streamingModeEnabled = false
+                    } label: {
+                        Text("Normal Mode")
+                            .font(LiveType.ui(size: 11, weight: .bold))
+                            .foregroundStyle(LiveDesign.text)
+                            .padding(.horizontal, 12)
+                            .frame(height: 34)
+                            .liveChromeCapsule()
+                    }
+                    .buttonStyle(.zcTapTarget)
+                    .accessibilityHint("Returns to the normal DISP view")
+                }
+                .padding(.top, max(8, layout.safeArea.top + 4))
+                .padding(.leading, max(10, layout.safeArea.leading + 6))
+                .padding(.trailing, max(10, layout.safeArea.trailing + 6))
+                .transition(.opacity)
+            }
+        }
+        .frame(width: layout.viewport.width, height: layout.viewport.height)
+        .environment(\.colorScheme, .dark)
+        .ignoresSafeArea()
+    }
+
+    private var streamingConnectionTint: Color {
+        if case .live = model.session.phase { return LiveDesign.good }
+        return LiveDesign.accent
     }
 
     private func chromeEditBannerY(_ layout: LiveMonitorLayout) -> CGFloat {

@@ -599,6 +599,19 @@ struct SettingsRootView: View {
 
     @ViewBuilder private var displayRows: some View {
         Group {
+            SettingsRowCard(title: "Streaming Mode") {
+                SettingsSwitchInlineRow(
+                    title: "Full-screen Nano video",
+                    help: "Landscape 16:9 video without recording, lens, assist, layer, or setup controls. Tap the picture to show or hide the small status overlay.",
+                    showTopDivider: false,
+                    isOn: model.streamingModeEnabled
+                ) {
+                    model.streamingModeEnabled.toggle()
+                    if model.streamingModeEnabled, model.isLive {
+                        model.liveOperatorPanel = nil
+                    }
+                }
+            }
             dispSectionCard(
                 .live,
                 reset: { model.dispLive = .liveDefaults }

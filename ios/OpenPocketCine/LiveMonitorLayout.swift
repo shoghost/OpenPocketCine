@@ -32,6 +32,42 @@ struct LiveMonitorLayout: Equatable {
     /// Device insets in canvas space (island / home indicator). Used to clamp popups.
     var safeArea: EdgeInsets = EdgeInsets()
 
+    /// Full-picture 16:9 monitor used by Streaming Mode. Unlike normal DISP chrome,
+    /// this centers the uncropped raster and gives it every available screen pixel.
+    static func streaming(viewport: CGSize, safeArea: EdgeInsets = EdgeInsets())
+        -> LiveMonitorLayout
+    {
+        let width = max(0, viewport.width)
+        let height = max(0, viewport.height)
+        let aspect = LiveChromeMetrics.feedAspect
+        let feedWidth = min(width, height * aspect)
+        let feedHeight = min(height, width / aspect)
+        let feed = CGRect(
+            x: (width - feedWidth) / 2,
+            y: (height - feedHeight) / 2,
+            width: feedWidth,
+            height: feedHeight
+        )
+        return LiveMonitorLayout(
+            viewport: CGSize(width: width, height: height),
+            feed: feed,
+            picture: feed,
+            lock: .zero,
+            battery: .zero,
+            topDeck: .zero,
+            assist: .zero,
+            capture: .zero,
+            rail: .zero,
+            settings: .zero,
+            media: .zero,
+            record: .zero,
+            disp: .zero,
+            isWidthConstrained: false,
+            showsBottomBars: false,
+            safeArea: safeArea
+        )
+    }
+
     /// 874×402 Dynamic Island leading 59: feed.maxX ≈ 773.7, rail.x ≈ 782.4, record center ≈ (823.8, 202).
     static func fit(
         viewportWidth: CGFloat,

@@ -78,6 +78,31 @@ final class LiveMonitorLayoutTests: XCTestCase {
         )
     }
 
+    func testStreamingModeCentersUncroppedSixteenByNineFeed() {
+        let layout = LiveMonitorLayout.streaming(
+            viewport: CGSize(width: 874, height: 402),
+            safeArea: EdgeInsets(top: 0, leading: 59, bottom: 21, trailing: 0)
+        )
+
+        XCTAssertEqual(
+            layout.feed.width / layout.feed.height, 16.0 / 9.0, accuracy: 0.0001)
+        XCTAssertEqual(layout.feed.height, 402, accuracy: 0.05)
+        XCTAssertEqual(layout.feed.midX, 874 / 2, accuracy: 0.05)
+        XCTAssertEqual(layout.feed.midY, 402 / 2, accuracy: 0.05)
+        XCTAssertEqual(layout.picture, layout.feed)
+        XCTAssertFalse(layout.showsBottomBars)
+        XCTAssertEqual(layout.safeArea.leading, 59)
+    }
+
+    func testStreamingModeLetterboxesTallLandscapeWithoutCropping() {
+        let layout = LiveMonitorLayout.streaming(viewport: CGSize(width: 640, height: 400))
+
+        XCTAssertEqual(layout.feed.width, 640, accuracy: 0.05)
+        XCTAssertEqual(layout.feed.height, 360, accuracy: 0.05)
+        XCTAssertEqual(layout.feed.minY, 20, accuracy: 0.05)
+        XCTAssertEqual(layout.picture, layout.feed)
+    }
+
     func testChromeScaleFloorsCompactPhonesAndLeavesProMaxAlone() {
         XCTAssertEqual(LiveChromeMetrics.chromeScale(shortestSide: 360), 0.935, accuracy: 0.001)
         XCTAssertEqual(LiveChromeMetrics.chromeScale(shortestSide: 320), 0.935, accuracy: 0.001)
