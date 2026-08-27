@@ -66,8 +66,9 @@ Hotspot error alone is recorded as a possible signing-entitlement issue, not
 treated as proof and not used to silently change the connection path.
 
 The separate sideload diagnostics target is intentionally not the production app. For Nano
-frame-pacing experiments it can buffer three already-decoded frames and release them on a 30 Hz
-display clock; the normal OpenPocketCine target keeps its existing unbuffered presentation path.
+frame-pacing experiments it can buffer about 800 ms of already-decoded frames and release them on
+a 30 Hz display clock; the normal OpenPocketCine target keeps its existing unbuffered presentation
+path.
 
 Platform notes for the wire (Hotspot Configuration, Local Network, CoreBluetooth):
 [iOS protocol notes](../protocol/ios/).

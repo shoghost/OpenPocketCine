@@ -43,10 +43,10 @@ final class DiagnosticsTargetTests: XCTestCase {
     }
 
     @MainActor
-    func testNanoDisplayPacerUsesBoundedThreeFrameReservoir() {
+    func testNanoDisplayPacerUsesBoundedStabilityReservoir() {
         XCTAssertEqual(NanoDisplayPacer.framesPerSecond, 30)
         XCTAssertEqual(NanoDisplayPacer.cadence, 1.0 / 30.0, accuracy: 0.000_001)
-        XCTAssertEqual(NanoDisplayPacer.targetDepth, 3)
-        XCTAssertEqual(NanoDisplayPacer.maximumDepth, 6)
+        XCTAssertEqual(NanoDisplayPacer.targetDepth, 24)
+        XCTAssertEqual(NanoDisplayPacer.maximumDepth, 45)
     }
 }

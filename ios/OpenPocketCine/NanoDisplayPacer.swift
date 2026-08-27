@@ -5,7 +5,7 @@ import UIKit
 
 /// Test-target-only presentation smoother for decoded Nano frames.
 ///
-/// VideoToolbox and the network pipeline run at full speed. This queue starts only after three
+/// VideoToolbox and the network pipeline run at full speed. This queue starts only after 24
 /// decoded frames are available, then releases at most one frame per display-clock cadence.
 /// Entries contain independent CVPixelBuffer-backed presentation work, so dropping an old entry
 /// cannot break AVC reference decoding.
@@ -13,8 +13,8 @@ import UIKit
 final class NanoDisplayPacer: NSObject {
     static let framesPerSecond = 30.0
     static let cadence = 1.0 / framesPerSecond
-    static let targetDepth = 3
-    static let maximumDepth = 6
+    static let targetDepth = 24
+    static let maximumDepth = 45
 
     private struct Entry {
         let sourceOrder: Int64
@@ -34,6 +34,9 @@ final class NanoDisplayPacer: NSObject {
     private var underflowCount = 0
     private var overflowDropCount = 0
     private var lateSourceDropCount = 0
+    private var rebufferCount = 0
+    private var rebufferStartedAt: CFTimeInterval?
+    private var lastRebufferDurationMs = 0.0
     private var inputIntervals: [TimeInterval] = []
     private var outputIntervals: [TimeInterval] = []
     private var lastInputAt: CFTimeInterval?
@@ -74,7 +77,11 @@ final class NanoDisplayPacer: NSObject {
         }
 
         if nextPresentationTime == nil, entries.count >= Self.targetDepth {
-            // Three decoded frames plus one cadence produces the requested ~90–100 ms reservoir.
+            if let startedAt = rebufferStartedAt {
+                lastRebufferDurationMs = max(0, now - startedAt) * 1_000
+                rebufferStartedAt = nil
+            }
+            // 24 decoded frames plus one cadence produces the requested ~800 ms reservoir.
             nextPresentationTime = now + Self.cadence
         }
         displayLink?.isPaused = false
@@ -97,6 +104,9 @@ final class NanoDisplayPacer: NSObject {
         underflowCount = 0
         overflowDropCount = 0
         lateSourceDropCount = 0
+        rebufferCount = 0
+        rebufferStartedAt = nil
+        lastRebufferDurationMs = 0
         lastLogAt = CACurrentMediaTime()
         displayLink?.isPaused = true
     }
@@ -124,6 +134,8 @@ final class NanoDisplayPacer: NSObject {
         guard !entries.isEmpty else {
             // The display layer naturally holds the last frame. Rebuffer before resuming.
             underflowCount += 1
+            rebufferCount += 1
+            rebufferStartedAt = now
             nextPresentationTime = nil
             logIfNeeded(now: now)
             return
@@ -180,14 +192,29 @@ final class NanoDisplayPacer: NSObject {
             "reason=\(reason)",
             "pacer_input=\(inputCount)",
             "pacer_output=\(outputCount)",
+            "target_buffer_frames=\(Self.targetDepth)",
+            "max_buffer_frames=\(Self.maximumDepth)",
             "buffer_depth=\(entries.count)",
-            "buffer_underflow_count=\(underflowCount)",
-            "buffer_overflow_drop_count=\(overflowDropCount)",
+            "current_buffer_duration_ms=\(bufferDurationMs)",
+            "underflow_count=\(underflowCount)",
+            "overflow_drop_count=\(overflowDropCount)",
+            "rebuffer_count=\(rebufferCount)",
+            "rebuffer_duration_ms=\(rebufferDurationMs)",
             "late_source_drop_count=\(lateSourceDropCount)",
             "input_interval_ms{\(inputStats)}",
-            "output_interval_ms{\(outputStats)}",
+            "pacer_output_interval_ms{\(outputStats)}",
         ]
         ControlLiveLog.line("pacer: \(fields.joined(separator: " "))")
+    }
+
+    private var bufferDurationMs: String {
+        String(format: "%.1f", Double(entries.count) * Self.cadence * 1_000)
+    }
+
+    private var rebufferDurationMs: String {
+        let duration = rebufferStartedAt.map { max(0, CACurrentMediaTime() - $0) * 1_000 }
+            ?? lastRebufferDurationMs
+        return String(format: "%.1f", duration)
     }
 
     private func intervalStats(_ values: [TimeInterval]) -> String {

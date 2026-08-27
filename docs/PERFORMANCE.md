@@ -25,9 +25,9 @@ the same PR.
 | Battery | Sticky `ACTION_BATTERY_CHANGED` (Android); no 1 Hz poll | [`ANDROID.md`](../ANDROID.md) |
 
 The separate `OpenPocketCineTest` diagnostics target has one deliberate exception to the normal
-live-picture policy: Nano AVC is decoded immediately, then `NanoDisplayPacer` holds three decoded
-frames (maximum six) and releases at 30 Hz from `CADisplayLink`. It exists only to A/B the measured
-UDP arrival jitter; production decode and presentation remain unpaced.
+live-picture policy: Nano AVC is decoded immediately, then `NanoDisplayPacer` holds 24 decoded
+frames (about 800 ms; maximum 45 / 1.5 s) and releases at 30 Hz from `CADisplayLink`. It exists only
+to A/B the measured UDP arrival jitter; production decode and presentation remain unpaced.
 
 ## Threading
 
