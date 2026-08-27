@@ -99,7 +99,9 @@ workflows:
             /usr/bin/zip -qry "$CM_BUILD_DIR/$IPA_OUTPUT" Payload
           )
           test -s "$IPA_OUTPUT"
-          /usr/bin/unzip -l "$IPA_OUTPUT" | head -40
+          # `head` closes the pipe early and makes unzip exit with SIGPIPE (141)
+          # under `set -o pipefail`, even though the IPA is valid.
+          /usr/bin/unzip -l "$IPA_OUTPUT" | sed -n '1,40p'
           file "$app/OpenPocketCine"
           lipo -info "$app/OpenPocketCine"
           echo "Unsigned IPA: $CM_BUILD_DIR/$IPA_OUTPUT"
