@@ -275,12 +275,13 @@ final class HevcDecoder {
 
     /// One access unit (Annex-B; the depacketizer already stripped the DJI frame marker).
     /// Pocket is HEVC; Nano is AVC. Returns true if a frame was enqueued for display.
-    @discardableResult
     #if OPENPOCKETCINE_DIAGNOSTICS
+    @discardableResult
     func decode(accessUnit: [UInt8], trace: LiveFrameTrace? = nil) -> Bool {
         decodeImpl(accessUnit: accessUnit, trace: trace)
     }
     #else
+    @discardableResult
     func decode(accessUnit: [UInt8]) -> Bool {
         decodeImpl(accessUnit: accessUnit, trace: nil)
     }
