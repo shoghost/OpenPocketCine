@@ -24,6 +24,11 @@ the same PR.
 | Zoom pinch | Distinct lens ticks at 20 Hz, no ACK wait | [`PARITY.md`](PARITY.md) |
 | Battery | Sticky `ACTION_BATTERY_CHANGED` (Android); no 1 Hz poll | [`ANDROID.md`](../ANDROID.md) |
 
+The separate `OpenPocketCineTest` diagnostics target has one deliberate exception to the normal
+live-picture policy: Nano AVC is decoded immediately, then `NanoDisplayPacer` holds three decoded
+frames (maximum six) and releases at 30 Hz from `CADisplayLink`. It exists only to A/B the measured
+UDP arrival jitter; production decode and presentation remain unpaced.
+
 ## Threading
 
 UDP receive re-arms on the network queue, not after a main-actor hop. A busy HUD

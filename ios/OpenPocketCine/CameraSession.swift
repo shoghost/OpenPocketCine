@@ -3379,6 +3379,10 @@ final class CameraSession {
     }
 
     func noteSceneBecameInactive() {
+        #if OPENPOCKETCINE_DIAGNOSTICS
+            decoder.resetDisplayPacerForBackground()
+            LiveFramePacingDiagnostics.shared.noteLifecycleBoundary()
+        #endif
         if case .manualWifiJoin = phase {
             log.info("wifi: leaving foreground for manual join")
             return

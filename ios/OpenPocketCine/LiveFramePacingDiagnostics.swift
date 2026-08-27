@@ -183,6 +183,20 @@ final class LiveFramePacingDiagnostics: @unchecked Sendable {
         }
     }
 
+    /// Breaks interval correlation across suspension without deleting the session CSV.
+    /// The rows completed before the boundary are queued for disk; stale partial traces are dropped.
+    func noteLifecycleBoundary() {
+        let rows = lock.withLock { state -> [String] in
+            let pending = state.csvRows
+            state.csvRows.removeAll(keepingCapacity: true)
+            state.frames.removeAll(keepingCapacity: true)
+            state.lastStageTime.removeAll(keepingCapacity: true)
+            state.lastSourceTimestamp = nil
+            return pending
+        }
+        flush(rows)
+    }
+
     /// Drains rows accumulated at the time of the call and completes after all earlier CSV writes.
     /// Frame collection remains live; rows arriving later stay in the next batch.
     func flushPending(completion: @escaping () -> Void) {

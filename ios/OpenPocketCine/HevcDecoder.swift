@@ -129,6 +129,10 @@ final class HevcDecoder {
     private let assistEngine = LiveAssistEngine()
     private let log = Logger(subsystem: "com.opencapture.openpocketcine", category: "hevc")
     private let loggedLiveVT = OSAllocatedUnfairLock(initialState: false)
+    #if OPENPOCKETCINE_DIAGNOSTICS
+        /// Nano-only, decoded-frame presentation pacing. Production never compiles this member.
+        private let nanoDisplayPacer = NanoDisplayPacer()
+    #endif
     /// Simulator (and any pixel-buffer-only source) paints identity on `CIFeedView`.
     private var prefersPixelBufferDisplay = false
     /// Fast / Quality / AI must present through Metal. Off keeps the identity HEVC layer.
@@ -162,6 +166,10 @@ final class HevcDecoder {
     }
 
     private var shouldStartVT: Bool {
+        #if OPENPOCKETCINE_DIAGNOSTICS
+            // Safe presentation drops require independent decoded frames, never compressed AVC AUs.
+            if liveCodec == .avc { return true }
+        #endif
         if prefersPixelBufferDisplay { return true }
         guard hardwareDecoderUnlocked else { return false }
         return effects.needsSample || sessionOwnsVT
@@ -488,6 +496,9 @@ final class HevcDecoder {
         vtRebuildCount = 0
         frameIndex = 0
         loggedLiveVT.withLock { $0 = false }
+        #if OPENPOCKETCINE_DIAGNOSTICS
+            nanoDisplayPacer.reset(reason: "decoder_reset")
+        #endif
         assistEngine.reset()
         sampleBus?.reset()
         // Invalidate VT and flush the layer. That is the Android analog of
@@ -585,12 +596,21 @@ final class HevcDecoder {
     /// last picture. Do **not** begin an IDR hold here — that dropped every
     /// P-frame after Control Center when 0x09/0xa8 was then skipped.
     func prepareAfterForeground() {
+        #if OPENPOCKETCINE_DIAGNOSTICS
+            nanoDisplayPacer.reset(reason: "foreground")
+        #endif
         if displayLayer.status == .failed || displayLayer.requiresFlushToResumeDecoding {
             displayLayer.flush()
         }
         if displayLayer.status == .failed { displayedImageRemoved = true }
         if shouldStartVT, format != nil { rebuildVT(force: true) }
     }
+
+    #if OPENPOCKETCINE_DIAGNOSTICS
+        func resetDisplayPacerForBackground() {
+            nanoDisplayPacer.reset(reason: "background")
+        }
+    #endif
 
     private func releaseLayerDecoderIfNeeded() {
         // Do not flushAndRemoveImage — the layer keeps the last picture so LUT-off
@@ -926,6 +946,9 @@ final class HevcDecoder {
             displayLayer.flush()
         }
         invalidateVT()
+        #if OPENPOCKETCINE_DIAGNOSTICS
+            nanoDisplayPacer.reset(reason: "format_change")
+        #endif
         vtAttemptedStamp = nil
         beginIDRHold()
         pendingParameterChangeEnable = true
@@ -1215,8 +1238,14 @@ final class HevcDecoder {
             #endif
             self.logFirstLiveVT(imageBuffer)
             #if OPENPOCKETCINE_DIAGNOSTICS
-                self.handleDecodedFrame(
-                    imageBuffer, effects: effects, transfer: transfer, trace: trace)
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    self.nanoDisplayPacer.enqueue(sourceTimestamp: trace?.sourceTimestamp) {
+                        [weak self] in
+                        self?.handleDecodedFrame(
+                            imageBuffer, effects: effects, transfer: transfer, trace: trace)
+                    }
+                }
             #else
                 self.handleDecodedFrame(imageBuffer, effects: effects, transfer: transfer)
             #endif
