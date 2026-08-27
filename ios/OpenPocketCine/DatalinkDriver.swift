@@ -89,8 +89,12 @@ final class DatalinkDriver {
     /// Called (on the main actor) for every DUML frame the camera pushes.
     /// Status, control ACKs, and media-list chunks (`0x00/0x27`) all arrive here.
     var onStatusFrame: ((Duml.Frame) -> Void)?
-    /// Called (on the main actor) with each complete HEVC access unit (DJI marker already stripped).
+    #if OPENPOCKETCINE_DIAGNOSTICS
+    var onAccessUnit: ((LivePacedAccessUnit) -> Void)?
+    #else
+    /// Production callback remains the proven byte-only path.
     var onAccessUnit: (([UInt8]) -> Void)?
+    #endif
 
     /// Snapshot of video-pipeline counters. Safe to read from the main actor for the HUD.
     var videoPackets: Int { videoAssembler.snapshot().packets }
@@ -1135,6 +1139,12 @@ final class DatalinkDriver {
 /// HEVC reassembly on the UDP queue. Main hops only complete access units (~25 Hz),
 /// not every SoftAP datagram.
 private final class SoftAPVideoAssembler: @unchecked Sendable {
+    #if OPENPOCKETCINE_DIAGNOSTICS
+    typealias PendingAccessUnit = LivePacedAccessUnit
+    #else
+    typealias PendingAccessUnit = [UInt8]
+    #endif
+
     struct Snapshot {
         var packets = 0
         var dropped = 0
@@ -1144,7 +1154,7 @@ private final class SoftAPVideoAssembler: @unchecked Sendable {
     }
 
     struct Ingest {
-        var accessUnit: [UInt8]?
+        var accessUnit: PendingAccessUnit?
         var firstPacket = false
         var shouldHop = false
     }
@@ -1157,7 +1167,15 @@ private final class SoftAPVideoAssembler: @unchecked Sendable {
         var lastAU: Date?
         var loggedFirst = false
         var peerCursor: UInt16 = 0
-        var pending: [[UInt8]] = []
+        var pending: [PendingAccessUnit] = []
+        #if OPENPOCKETCINE_DIAGNOSTICS
+        var diagnosticFrameNumber: UInt8?
+        var diagnosticFrameID: UInt64 = 0
+        var diagnosticFrameArrival: TimeInterval = 0
+        var diagnosticRecordBytes: [UInt8] = []
+        var seenPositions: Set<Int> = []
+        var maxPosition: Int?
+        #endif
         var hopScheduled = false
     }
 
@@ -1172,9 +1190,54 @@ private final class SoftAPVideoAssembler: @unchecked Sendable {
             }
             let first = !state.loggedFirst
             if first { state.loggedFirst = true }
+            #if OPENPOCKETCINE_DIAGNOSTICS
+            let now = ProcessInfo.processInfo.systemUptime
+            let frameNumber = datagram[16]
+            let position = Int(datagram[18]) * 2 + Int(datagram[17] >> 7)
+            let previousFrameID = state.diagnosticFrameID
+            let previousArrival = state.diagnosticFrameArrival
+            let previousRecord = state.diagnosticRecordBytes
+            if state.diagnosticFrameNumber != frameNumber {
+                state.diagnosticFrameNumber = frameNumber
+                state.diagnosticFrameID &+= 1
+                state.diagnosticFrameArrival = now
+                state.diagnosticRecordBytes.removeAll(keepingCapacity: true)
+                state.seenPositions.removeAll(keepingCapacity: true)
+                state.maxPosition = nil
+                LiveFramePacingDiagnostics.shared.noteUDPFrame(
+                    id: state.diagnosticFrameID, at: now)
+            }
+            if state.seenPositions.contains(position) {
+                LiveFramePacingDiagnostics.shared.noteDuplicateFragment()
+            } else if let maxPosition = state.maxPosition, position < maxPosition {
+                LiveFramePacingDiagnostics.shared.noteReorderedFragment()
+            }
+            state.seenPositions.insert(position)
+            state.maxPosition = max(state.maxPosition ?? position, position)
+            state.diagnosticRecordBytes.append(contentsOf: datagram[20...])
+            let droppedBefore = state.depacketizer.droppedIncomplete
+            let bytes = state.depacketizer.feed(datagram)
+            if state.depacketizer.droppedIncomplete > droppedBefore {
+                LiveFramePacingDiagnostics.shared.noteIncompleteFrame(id: previousFrameID)
+            }
+            let au = bytes.map {
+                LivePacedAccessUnit(
+                    bytes: $0,
+                    trace: LiveFrameTrace(
+                        id: previousFrameID,
+                        udpArrival: previousArrival,
+                        accessUnitComplete: now,
+                        sourceTimestamp: LiveFramePacingDiagnostics.djiRecordTimestamp(
+                            previousRecord)))
+            }
+            #else
             let au = state.depacketizer.feed(datagram)
+            #endif
             var shouldHop = false
             if let au {
+                #if OPENPOCKETCINE_DIAGNOSTICS
+                    LiveFramePacingDiagnostics.shared.noteAccessUnitComplete(au.trace)
+                #endif
                 state.accessUnits += 1
                 state.lastAU = Date()
                 state.pending.append(au)
@@ -1190,7 +1253,7 @@ private final class SoftAPVideoAssembler: @unchecked Sendable {
         }
     }
 
-    func takePending() -> [[UInt8]] {
+    func takePending() -> [PendingAccessUnit] {
         lock.withLock { state in
             let aus = state.pending
             state.pending.removeAll(keepingCapacity: true)

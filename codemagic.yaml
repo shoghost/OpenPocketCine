@@ -111,3 +111,123 @@ workflows:
       - build/ios-device/Build/Products/Release-iphoneos/OpenPocketCine.app
       - build/OpenPocketCineTests.xcresult
       - /tmp/xcodebuild_logs/*.log
+
+  ios-test-unsigned:
+    name: OpenPocketCine Test iOS unsigned IPA
+    instance_type: mac_mini_m2
+    max_build_duration: 60
+    environment:
+      xcode: latest
+      vars:
+        XCODE_PROJECT: ios/OpenPocketCine.xcodeproj
+        XCODE_SCHEME: OpenPocketCineTest
+        DEVICE_DERIVED_DATA: build/ios-test-device
+        SIMULATOR_DERIVED_DATA: build/ios-test-simulator
+        IPA_STAGING: build/unsigned-test-ipa
+        IPA_OUTPUT: build/OpenPocketCineTest-unsigned.ipa
+    cache:
+      cache_paths:
+        - $HOME/Library/Caches/org.swift.swiftpm
+        - $HOME/Library/Developer/Xcode/DerivedData/SourcePackages
+    scripts:
+      - name: Show Apple toolchain
+        script: |
+          set -euo pipefail
+          xcodebuild -version
+          swift --version
+
+      - name: Install XcodeGen
+        script: |
+          set -euo pipefail
+          if ! command -v xcodegen >/dev/null 2>&1; then
+            brew install xcodegen
+          fi
+          xcodegen --version
+
+      - name: Validate plist and generate Xcode project
+        script: |
+          set -euo pipefail
+          plutil -lint ios/OpenPocketCine/Info-Frameio.plist
+          plutil -lint ios/OpenPocketCine/OpenPocketCine.entitlements
+          (
+            cd ios
+            xcodegen generate
+          )
+          xcodebuild -project "$XCODE_PROJECT" -scheme "$XCODE_SCHEME" -list
+
+      - name: Compile and test portable Swift core
+        script: |
+          set -euo pipefail
+          swift test --parallel
+
+      - name: Run production and diagnostics iOS unit tests without signing
+        script: |
+          set -euo pipefail
+          mkdir -p build
+          simulator_udid="$(xcrun simctl list devices available | awk -F '[()]' '/iPhone/ && !found { print $2; found = 1 }')"
+          if [ -z "$simulator_udid" ]; then
+            echo "No available iPhone simulator found." >&2
+            exit 1
+          fi
+          xcrun simctl boot "$simulator_udid" 2>/dev/null || true
+          xcrun simctl bootstatus "$simulator_udid" -b
+          rm -rf build/OpenPocketCineTestTests.xcresult
+          xcodebuild test \
+            -project "$XCODE_PROJECT" \
+            -scheme "$XCODE_SCHEME" \
+            -configuration Debug \
+            -destination "platform=iOS Simulator,id=$simulator_udid" \
+            -derivedDataPath "$SIMULATOR_DERIVED_DATA" \
+            -resultBundlePath build/OpenPocketCineTestTests.xcresult \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO
+
+      - name: Build generic iOS device diagnostics app without signing
+        script: |
+          set -euo pipefail
+          xcodebuild build \
+            -project "$XCODE_PROJECT" \
+            -scheme "$XCODE_SCHEME" \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -sdk iphoneos \
+            -derivedDataPath "$DEVICE_DERIVED_DATA" \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            DEVELOPMENT_TEAM="" \
+            COMPILER_INDEX_STORE_ENABLE=NO
+
+      - name: Package and verify unsigned diagnostics IPA
+        script: |
+          set -euo pipefail
+          app="$DEVICE_DERIVED_DATA/Build/Products/Release-iphoneos/OpenPocketCineTest.app"
+          executable="$app/OpenPocketCineTest"
+          test -d "$app"
+          test -x "$executable"
+          bundle_id="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Info.plist")"
+          display_name="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$app/Info.plist")"
+          test "$bundle_id" = "com.opencapture.openpocketcine.test"
+          test "$display_name" = "OpenPocketCine Test"
+          rm -rf "$IPA_STAGING" "$IPA_OUTPUT"
+          mkdir -p "$IPA_STAGING/Payload"
+          ditto "$app" "$IPA_STAGING/Payload/OpenPocketCineTest.app"
+          (
+            cd "$IPA_STAGING"
+            /usr/bin/zip -qry "$CM_BUILD_DIR/$IPA_OUTPUT" Payload
+          )
+          test -s "$IPA_OUTPUT"
+          /usr/bin/unzip -t "$IPA_OUTPUT"
+          /usr/bin/unzip -l "$IPA_OUTPUT" | sed -n '1,40p'
+          file "$executable"
+          lipo -info "$executable"
+          echo "Bundle ID: $bundle_id"
+          echo "Display Name: $display_name"
+          echo "Unsigned Test IPA: $CM_BUILD_DIR/$IPA_OUTPUT"
+
+    artifacts:
+      - build/OpenPocketCineTest-unsigned.ipa
+      - build/ios-test-device/Build/Products/Release-iphoneos/OpenPocketCineTest.app
+      - build/OpenPocketCineTestTests.xcresult
+      - /tmp/xcodebuild_logs/*.log

@@ -581,6 +581,9 @@ final class CameraSession {
         connectedCamera = camera
         rawAccessUnits = 0
         rawFramesEnqueued = 0
+        #if OPENPOCKETCINE_DIAGNOSTICS
+            LiveFramePacingDiagnostics.shared.reset()
+        #endif
         lastIdrRequest = Date.distantPast
         liveViewEnableSent = false
         liveViewEnableSends = 0
@@ -3869,10 +3872,19 @@ final class CameraSession {
         }
     }
 
+    #if OPENPOCKETCINE_DIAGNOSTICS
+    private func ingestAccessUnit(_ accessUnit: LivePacedAccessUnit) {
+        rawAccessUnits += 1
+        if decoder.decode(accessUnit: accessUnit.bytes, trace: accessUnit.trace) {
+            rawFramesEnqueued += 1
+        }
+    }
+    #else
     private func ingestAccessUnit(_ accessUnit: [UInt8]) {
         rawAccessUnits += 1
         if decoder.decode(accessUnit: accessUnit) { rawFramesEnqueued += 1 }
     }
+    #endif
 
     private func publishStatusNow() {
         lastStatusMutation = CFAbsoluteTimeGetCurrent()

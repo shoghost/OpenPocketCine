@@ -276,7 +276,17 @@ final class HevcDecoder {
     /// One access unit (Annex-B; the depacketizer already stripped the DJI frame marker).
     /// Pocket is HEVC; Nano is AVC. Returns true if a frame was enqueued for display.
     @discardableResult
+    #if OPENPOCKETCINE_DIAGNOSTICS
+    func decode(accessUnit: [UInt8], trace: LiveFrameTrace? = nil) -> Bool {
+        decodeImpl(accessUnit: accessUnit, trace: trace)
+    }
+    #else
     func decode(accessUnit: [UInt8]) -> Bool {
+        decodeImpl(accessUnit: accessUnit, trace: nil)
+    }
+    #endif
+
+    private func decodeImpl(accessUnit: [UInt8], trace: LiveFrameTrace?) -> Bool {
         if let provided = effectsProvider?(), provided != effects {
             effects = provided
         }
@@ -335,9 +345,19 @@ final class HevcDecoder {
             FeedWatchdog.shouldPresentSample(
                 hasPicture: !slices.isEmpty, awaitingIDR: awaitingIDR, isIDR: hasIDR
             )
-        else { return false }
+        else {
+            #if OPENPOCKETCINE_DIAGNOSTICS
+                if !slices.isEmpty, awaitingIDR, let trace {
+                    LiveFramePacingDiagnostics.shared.noteIDRWaitDrop(trace)
+                }
+            #endif
+            return false
+        }
         guard let format, let sample = sampleBuffer(slices, format), Self.isPresentable(sample)
         else { return false }
+        #if OPENPOCKETCINE_DIAGNOSTICS
+            if let trace { LiveFramePacingDiagnostics.shared.noteDecoderInput(trace) }
+        #endif
         if hasIDR {
             if awaitingIDR {
                 log.info("feed: IDR landed — release hold")
@@ -358,7 +378,7 @@ final class HevcDecoder {
             }
             // Do not fall through to HEVC enqueue — that dual-decodes and can
             // fail the layer to black when presentProcessed misses one AU.
-            return presentProcessed(sample)
+            return presentProcessed(sample, trace: trace)
         } else {
             vtOwnsHardwareDecode = false
             displayLayer.isHidden = false
@@ -371,6 +391,9 @@ final class HevcDecoder {
         CATransaction.setDisableActions(true)
         displayLayer.enqueue(sample)
         CATransaction.commit()
+        #if OPENPOCKETCINE_DIAGNOSTICS
+            if let trace { LiveFramePacingDiagnostics.shared.noteDisplaySubmit(trace) }
+        #endif
         if displayLayer.status == .failed {
             displayLayer.flush()
             if displayLayer.status == .failed {
@@ -387,10 +410,31 @@ final class HevcDecoder {
 
     /// Single entry for live VT, the simulator clip, and tests. A decoded `CVPixelBuffer` is enough.
     /// Assist work is off-main; this method does not hop to MainActor before enqueueing.
+    #if OPENPOCKETCINE_DIAGNOSTICS
+    nonisolated func handleDecodedFrame(
+        _ imageBuffer: CVPixelBuffer,
+        effects: LiveImageEffects? = nil,
+        transfer: MonitorTransfer? = nil,
+        trace: LiveFrameTrace? = nil
+    ) {
+        handleDecodedFrameImpl(
+            imageBuffer, effects: effects, transfer: transfer, trace: trace)
+    }
+    #else
     nonisolated func handleDecodedFrame(
         _ imageBuffer: CVPixelBuffer,
         effects: LiveImageEffects? = nil,
         transfer: MonitorTransfer? = nil
+    ) {
+        handleDecodedFrameImpl(imageBuffer, effects: effects, transfer: transfer, trace: nil)
+    }
+    #endif
+
+    nonisolated private func handleDecodedFrameImpl(
+        _ imageBuffer: CVPixelBuffer,
+        effects: LiveImageEffects?,
+        transfer: MonitorTransfer?,
+        trace: LiveFrameTrace?
     ) {
         // One MainActor hop per engine callback — a second per-frame Task for the frame
         // counters doubled main-queue pressure at 25 fps for two one-line writes.
@@ -398,7 +442,7 @@ final class HevcDecoder {
             [weak self] result in
             Task { @MainActor [weak self] in
                 guard let self else { return }
-                self.applyAssistResult(result)
+                self.applyAssistResult(result, trace: trace)
                 // Once per drained frame; the late scope-bundle callback must not double-count.
                 if result.shouldPresent {
                     self.notePresentedFrame(sampleRate: true)
@@ -708,7 +752,7 @@ final class HevcDecoder {
         }
     }
 
-    private func applyAssistResult(_ result: LiveAssistEngine.Result) {
+    private func applyAssistResult(_ result: LiveAssistEngine.Result, trace: LiveFrameTrace? = nil) {
         if let bundle = result.bundle {
             sampleBus?.publish(
                 source: result.source,
@@ -721,6 +765,11 @@ final class HevcDecoder {
             onSourceFrame?(result.source)
         }
         if !result.shouldPresent { return }
+        #if OPENPOCKETCINE_DIAGNOSTICS
+            defer {
+                if let trace { LiveFramePacingDiagnostics.shared.noteDisplaySubmit(trace) }
+            }
+        #endif
 
         let replaceIdentity = effects.replacesIdentityFeed
         let metalOwnsPicture = replaceIdentity && (processedFeed?.hasPresentedFrame ?? false)
@@ -1107,7 +1156,7 @@ final class HevcDecoder {
 
     /// Decode to a pixel buffer. GPU fx and scopes run on `LiveAssistEngine` (off-main).
     @discardableResult
-    private func presentProcessed(_ sample: CMSampleBuffer) -> Bool {
+    private func presentProcessed(_ sample: CMSampleBuffer, trace: LiveFrameTrace?) -> Bool {
         if vtSession == nil, format != nil { rebuildVT() }
         guard let vtSession else { return false }
         let fx = effects
@@ -1118,14 +1167,15 @@ final class HevcDecoder {
         let flags: VTDecodeFrameFlags = [._EnableAsynchronousDecompression]
         let gen = vtGeneration
         let err = decodeFrame(
-            vtSession, sample, flags: flags, generation: gen, effects: fx, transfer: transfer)
+            vtSession, sample, flags: flags, generation: gen, effects: fx, transfer: transfer,
+            trace: trace)
         if err == noErr { return true }
         if Self.shouldRebuildSession(status: err) {
             rebuildVT(force: true)
             if let rebuilt = self.vtSession,
                 decodeFrame(
                     rebuilt, sample, flags: flags, generation: vtGeneration, effects: fx,
-                    transfer: transfer) == noErr
+                    transfer: transfer, trace: trace) == noErr
             {
                 return true
             }
@@ -1140,7 +1190,8 @@ final class HevcDecoder {
         flags: VTDecodeFrameFlags,
         generation: Int,
         effects: LiveImageEffects,
-        transfer: MonitorTransfer
+        transfer: MonitorTransfer,
+        trace: LiveFrameTrace?
     ) -> OSStatus {
         VTDecompressionSessionDecodeFrame(
             session, sampleBuffer: sample, flags: flags, infoFlagsOut: nil
@@ -1158,8 +1209,16 @@ final class HevcDecoder {
                 return
             }
             guard let imageBuffer, Self.isPresentable(imageBuffer) else { return }
+            #if OPENPOCKETCINE_DIAGNOSTICS
+                if let trace { LiveFramePacingDiagnostics.shared.noteDecoderOutput(trace) }
+            #endif
             self.logFirstLiveVT(imageBuffer)
-            self.handleDecodedFrame(imageBuffer, effects: effects, transfer: transfer)
+            #if OPENPOCKETCINE_DIAGNOSTICS
+                self.handleDecodedFrame(
+                    imageBuffer, effects: effects, transfer: transfer, trace: trace)
+            #else
+                self.handleDecodedFrame(imageBuffer, effects: effects, transfer: transfer)
+            #endif
         }
     }
 

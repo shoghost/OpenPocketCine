@@ -1,0 +1,323 @@
+import Foundation
+import OpenPocketViewCore
+import os
+
+/// Correlation token carried with one completed camera access unit. Timing is monotonic so wall-clock
+/// changes cannot create false stalls.
+struct LiveFrameTrace: Sendable {
+    let id: UInt64
+    let udpArrival: TimeInterval
+    let accessUnitComplete: TimeInterval
+    let sourceTimestamp: UInt32?
+}
+
+struct LivePacedAccessUnit: Sendable {
+    let bytes: [UInt8]
+    let trace: LiveFrameTrace
+}
+
+#if OPENPOCKETCINE_DIAGNOSTICS
+enum FramePacingStage: String, CaseIterable, Sendable {
+    case udpFrameArrival = "udp_frame_arrival"
+    case accessUnitComplete = "access_unit_complete"
+    case decoderInput = "decoder_input"
+    case decoderOutput = "decoder_output"
+    case displaySubmit = "display_submit"
+}
+
+struct FramePacingIntervalSummary: Equatable, Sendable {
+    var count: Int
+    var medianMs: Double
+    var p95Ms: Double
+    var p99Ms: Double
+    var maxMs: Double
+
+    init(intervalsSeconds: [Double]) {
+        let values = intervalsSeconds.filter { $0 > 0 }.map { $0 * 1_000 }.sorted()
+        count = values.count
+        medianMs = Self.percentile(values, 0.50)
+        p95Ms = Self.percentile(values, 0.95)
+        p99Ms = Self.percentile(values, 0.99)
+        maxMs = values.last ?? 0
+    }
+
+    private static func percentile(_ sorted: [Double], _ fraction: Double) -> Double {
+        guard !sorted.isEmpty else { return 0 }
+        let rank = Int(ceil(fraction * Double(sorted.count))) - 1
+        return sorted[max(0, min(sorted.count - 1, rank))]
+    }
+}
+
+enum FramePacingGapCause: String, Sendable {
+    case udp = "A_udp_source_gap"
+    case accessUnit = "B_access_unit_completion"
+    case decoder = "C_decoder_output"
+    case display = "D_display_or_main_thread"
+    case timestamp = "E_timestamp_or_pacing"
+    case incomplete = "dropped_incomplete_avc"
+    case idrWait = "dropped_while_waiting_for_idr"
+    case unknown = "unclassified"
+}
+
+enum FramePacingClassifier {
+    static func classify(
+        udpMs: Double?, accessUnitMs: Double?, decoderInputMs: Double?, decoderOutputMs: Double?,
+        displayMs: Double?, sourceTimestampMs: Double?, thresholdMs: Double = 50
+    ) -> FramePacingGapCause {
+        if let udpMs, udpMs > thresholdMs { return .udp }
+        if let sourceTimestampMs, sourceTimestampMs > thresholdMs,
+            (udpMs ?? 0) <= thresholdMs
+        {
+            return .timestamp
+        }
+        if let accessUnitMs, accessUnitMs > thresholdMs { return .accessUnit }
+        if let decoderInputMs, decoderInputMs > thresholdMs { return .display }
+        if let decoderOutputMs, decoderOutputMs > thresholdMs { return .decoder }
+        if let displayMs, displayMs > thresholdMs,
+            (decoderInputMs ?? 0) <= thresholdMs
+        {
+            return .display
+        }
+        return .unknown
+    }
+}
+
+/// Low-overhead, diagnostics-only probe for occasional live-view pacing gaps. Hot paths only take a
+/// short lock and append value types; CSV I/O and human-readable logging run on a utility queue.
+final class LiveFramePacingDiagnostics: @unchecked Sendable {
+    static let shared = LiveFramePacingDiagnostics()
+    static let isEnabled = true
+
+    private struct FrameTimes {
+        var sourceTimestamp: UInt32?
+        var sourceDeltaMs: Double? = nil
+        var times: [FramePacingStage: TimeInterval] = [:]
+        var intervals: [FramePacingStage: TimeInterval] = [:]
+    }
+
+    private struct State {
+        var frames: [UInt64: FrameTimes] = [:]
+        var lastStageTime: [FramePacingStage: TimeInterval] = [:]
+        var intervals: [FramePacingStage: [TimeInterval]] = [:]
+        var lastSourceTimestamp: UInt32?
+        var sourceIntervals: [TimeInterval] = []
+        var gapCounts: [FramePacingStage: [Int: Int]] = [:]
+        var lastSummaryAt: TimeInterval = 0
+        var incompleteFrames = 0
+        var duplicateFragments = 0
+        var reorderedFragments = 0
+        var idrWaitDrops = 0
+        var csvRows: [String] = []
+    }
+
+    private let lock = OSAllocatedUnfairLock(initialState: State())
+    private let writer = DispatchQueue(label: "opv.frame-pacing.csv", qos: .utility)
+    private let log = Logger(
+        subsystem: "com.opencapture.openpocketcine", category: "frame-pacing")
+    private let historyLimit = 4_096
+    private let flushRows = 128
+    private let thresholds = [50, 66, 100, 150]
+    private let fileName = "live-frame-pacing.csv"
+
+    private init() {}
+
+    static func djiRecordTimestamp(_ bytes: [UInt8]) -> UInt32? {
+        guard bytes.count >= 16, bytes[0] == 0, bytes[1] == 0, bytes[2] == 1,
+            bytes[3] == 0xff
+        else { return nil }
+        return UInt32(bytes[12]) | (UInt32(bytes[13]) << 8) | (UInt32(bytes[14]) << 16)
+            | (UInt32(bytes[15]) << 24)
+    }
+
+    func reset() {
+        lock.withLock { state in
+            state = State()
+        }
+        writer.async { [fileName] in
+            guard let directory = FileManager.default.urls(
+                for: .documentDirectory, in: .userDomainMask
+            ).first else { return }
+            let url = directory.appendingPathComponent(fileName)
+            try? FileManager.default.removeItem(at: url)
+        }
+    }
+
+    func noteUDPFrame(id: UInt64, at: TimeInterval) {
+        let trace = LiveFrameTrace(
+            id: id, udpArrival: at, accessUnitComplete: at, sourceTimestamp: nil)
+        note(.udpFrameArrival, trace: trace, at: at)
+    }
+
+    func noteAccessUnitComplete(_ trace: LiveFrameTrace) {
+        note(.accessUnitComplete, trace: trace, at: trace.accessUnitComplete)
+    }
+
+    func noteDecoderInput(_ trace: LiveFrameTrace) {
+        note(.decoderInput, trace: trace, at: ProcessInfo.processInfo.systemUptime)
+    }
+
+    func noteDecoderOutput(_ trace: LiveFrameTrace) {
+        note(.decoderOutput, trace: trace, at: ProcessInfo.processInfo.systemUptime)
+    }
+
+    func noteDisplaySubmit(_ trace: LiveFrameTrace) {
+        note(.displaySubmit, trace: trace, at: ProcessInfo.processInfo.systemUptime)
+    }
+
+    func noteIncompleteFrame(id: UInt64) {
+        lock.withLock { state in
+            state.incompleteFrames += 1
+            if let frame = state.frames.removeValue(forKey: id) {
+                state.csvRows.append(Self.csvRow(id, frame, .incomplete))
+            }
+        }
+    }
+    func noteDuplicateFragment() { lock.withLock { $0.duplicateFragments += 1 } }
+    func noteReorderedFragment() { lock.withLock { $0.reorderedFragments += 1 } }
+    func noteIDRWaitDrop(_ trace: LiveFrameTrace) {
+        lock.withLock { state in
+            state.idrWaitDrops += 1
+            if let frame = state.frames.removeValue(forKey: trace.id) {
+                state.csvRows.append(Self.csvRow(trace.id, frame, .idrWait))
+            }
+        }
+    }
+
+    private func note(_ stage: FramePacingStage, trace: LiveFrameTrace, at now: TimeInterval) {
+        var rows: [String] = []
+        var summary: String?
+        lock.withLock { state in
+            var frame = state.frames[trace.id] ?? FrameTimes(sourceTimestamp: trace.sourceTimestamp)
+            frame.sourceTimestamp = trace.sourceTimestamp
+            frame.times[stage] = now
+            if let previous = state.lastStageTime[stage], now > previous {
+                let interval = now - previous
+                frame.intervals[stage] = interval
+                var stageIntervals = state.intervals[stage] ?? []
+                stageIntervals.append(interval)
+                if stageIntervals.count > historyLimit {
+                    stageIntervals.removeFirst(stageIntervals.count - historyLimit)
+                }
+                state.intervals[stage] = stageIntervals
+                for threshold in thresholds where interval * 1_000 > Double(threshold) {
+                    var counts = state.gapCounts[stage] ?? [:]
+                    counts[threshold, default: 0] += 1
+                    state.gapCounts[stage] = counts
+                }
+            }
+            state.lastStageTime[stage] = now
+
+            if stage == .accessUnitComplete, let timestamp = trace.sourceTimestamp {
+                if let previous = state.lastSourceTimestamp {
+                    let delta = timestamp &- previous
+                    // Nano's observed record clock is milliseconds. Resets/wraps are retained in
+                    // CSV as raw timestamps but excluded from pacing classification.
+                    if delta > 0, delta < 1_000 {
+                        frame.sourceDeltaMs = Double(delta)
+                        state.sourceIntervals.append(Double(delta) / 1_000)
+                        if state.sourceIntervals.count > historyLimit {
+                            state.sourceIntervals.removeFirst(
+                                state.sourceIntervals.count - historyLimit)
+                        }
+                    }
+                }
+                state.lastSourceTimestamp = timestamp
+            }
+            state.frames[trace.id] = frame
+
+            if stage == .displaySubmit {
+                let cause = FramePacingClassifier.classify(
+                    udpMs: frame.intervals[.udpFrameArrival].map { $0 * 1_000 },
+                    accessUnitMs: frame.intervals[.accessUnitComplete].map { $0 * 1_000 },
+                    decoderInputMs: frame.intervals[.decoderInput].map { $0 * 1_000 },
+                    decoderOutputMs: frame.intervals[.decoderOutput].map { $0 * 1_000 },
+                    displayMs: frame.intervals[.displaySubmit].map { $0 * 1_000 },
+                    sourceTimestampMs: frame.sourceDeltaMs)
+                state.csvRows.append(Self.csvRow(trace.id, frame, cause))
+                state.frames[trace.id] = nil
+            }
+            // Bound traces that were dropped before display.
+            if state.frames.count > 512 {
+                for key in state.frames.keys.sorted().prefix(state.frames.count - 512) {
+                    state.frames[key] = nil
+                }
+            }
+            if state.csvRows.count >= flushRows {
+                rows = state.csvRows
+                state.csvRows.removeAll(keepingCapacity: true)
+            }
+            if now - state.lastSummaryAt >= 5 {
+                state.lastSummaryAt = now
+                summary = Self.summaryLine(state)
+                if !state.csvRows.isEmpty {
+                    rows.append(contentsOf: state.csvRows)
+                    state.csvRows.removeAll(keepingCapacity: true)
+                }
+            }
+        }
+        flush(rows)
+        if let summary {
+            log.info("\(summary, privacy: .public)")
+            ControlLiveLog.line(summary)
+        }
+    }
+
+    private static func csvRow(
+        _ id: UInt64, _ frame: FrameTimes, _ cause: FramePacingGapCause
+    ) -> String {
+        func value(_ stage: FramePacingStage) -> String {
+            frame.times[stage].map { String(format: "%.6f", $0) } ?? ""
+        }
+        func interval(_ stage: FramePacingStage) -> String {
+            frame.intervals[stage].map { String(format: "%.3f", $0 * 1_000) } ?? ""
+        }
+        return [
+            String(id), frame.sourceTimestamp.map { String($0) } ?? "",
+            value(.udpFrameArrival), value(.accessUnitComplete), value(.decoderInput),
+            value(.decoderOutput), value(.displaySubmit), interval(.udpFrameArrival),
+            interval(.accessUnitComplete), interval(.decoderInput), interval(.decoderOutput),
+            interval(.displaySubmit), frame.sourceDeltaMs.map { String(format: "%.3f", $0) } ?? "",
+            cause.rawValue,
+        ].joined(separator: ",")
+    }
+
+    private static func summaryLine(_ state: State) -> String {
+        let stages = FramePacingStage.allCases.map { stage -> String in
+            let stats = FramePacingIntervalSummary(intervalsSeconds: state.intervals[stage] ?? [])
+            let gaps = [50, 66, 100, 150].map {
+                "gt\($0)=\(state.gapCounts[stage]?[$0] ?? 0)"
+            }.joined(separator: "/")
+            return "\(stage.rawValue){n=\(stats.count) med=\(f(stats.medianMs)) p95=\(f(stats.p95Ms)) p99=\(f(stats.p99Ms)) max=\(f(stats.maxMs)) \(gaps)}"
+        }.joined(separator: " ")
+        let source = FramePacingIntervalSummary(intervalsSeconds: state.sourceIntervals)
+        return "pacing: \(stages) source_ts{n=\(source.count) med=\(f(source.medianMs)) p95=\(f(source.p95Ms)) p99=\(f(source.p99Ms)) max=\(f(source.maxMs))} incomplete=\(state.incompleteFrames) dup=\(state.duplicateFragments) reorder=\(state.reorderedFragments) idrWait=\(state.idrWaitDrops)"
+    }
+
+    private static func f(_ value: Double) -> String { String(format: "%.1f", value) }
+
+    private func flush(_ rows: [String]) {
+        guard !rows.isEmpty else { return }
+        writer.async { [fileName] in
+            guard let directory = FileManager.default.urls(
+                for: .documentDirectory, in: .userDomainMask
+            ).first else { return }
+            let url = directory.appendingPathComponent(fileName)
+            let header = "frame_id,source_timestamp,udp_arrival_s,au_complete_s,decoder_input_s,decoder_output_s,display_submit_s,udp_interval_ms,au_interval_ms,decoder_input_interval_ms,decoder_output_interval_ms,display_interval_ms,source_interval_ms,cause\n"
+            if !FileManager.default.fileExists(atPath: url.path) {
+                try? Data(header.utf8).write(to: url)
+            }
+            guard let handle = try? FileHandle(forWritingTo: url) else { return }
+            defer { try? handle.close() }
+            _ = try? handle.seekToEnd()
+            try? handle.write(contentsOf: Data((rows.joined(separator: "\n") + "\n").utf8))
+        }
+    }
+}
+#else
+/// Production target shim. No diagnostic state, locks, tasks, logs, or files are created.
+final class LiveFramePacingDiagnostics: @unchecked Sendable {
+    static let shared = LiveFramePacingDiagnostics()
+    static let isEnabled = false
+    private init() {}
+}
+#endif
