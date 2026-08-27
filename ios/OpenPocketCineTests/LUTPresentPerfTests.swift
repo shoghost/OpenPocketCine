@@ -55,12 +55,14 @@ final class LUTPresentPerfTests: XCTestCase {
         print(
             "LUT present ms proxy=\(String(format: "%.2f", proxy)) 4K=\(String(format: "%.2f", fourK)) identity=\(String(format: "%.2f", identity))"
         )
+        // Simulator Metal runs on a shared virtual GPU. Keep this as a regression
+        // tripwire, not a physical-device 60 Hz deadline: the Codemagic M2 VM
+        // measured 21.12 ms while the same run's capped 4K path was 25.01 ms.
         XCTAssertLessThan(
-            proxy, 16,
-            "720p LUT bake+GPU must stay inside one 60 Hz frame after warmup (was \(proxy) ms)")
-        // Size tests pin the 1440 cap. This timing is a disaster tripwire for CI
-        // GPU, not the physical SLO (docs/PERFORMANCE.md). A GitHub macOS runner
-        // measured ~48 ms here; 24 ms is a phone, not a shared VM.
+            proxy, 32,
+            "720p LUT bake+GPU exceeded the CI regression budget (was \(proxy) ms)")
+        // Size tests pin the 1440 cap. These timings are CI disaster tripwires;
+        // physical presentation latency belongs in device performance tests.
         XCTAssertLessThan(
             fourK, 80,
             "4K must cap at 1440 before the cube; bake was \(fourK) ms")
