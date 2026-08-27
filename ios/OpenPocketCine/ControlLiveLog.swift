@@ -21,6 +21,14 @@ enum ControlLiveLog {
         queue.async { append(stampedAt, text) }
     }
 
+    #if OPENPOCKETCINE_DIAGNOSTICS
+        /// Completes after every journal write queued before this call has reached disk.
+        /// Used by the diagnostics target before handing the existing file to a share sheet.
+        nonisolated static func flush(completion: @escaping () -> Void) {
+            queue.async { completion() }
+        }
+    #endif
+
     // Queue-confined.
     private static var appendsSinceTrim = 0
     private static let stamper = ISO8601DateFormatter()

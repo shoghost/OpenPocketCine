@@ -78,6 +78,13 @@ struct SettingsRootView: View {
     @State private var showLUTPicker = false
     @State private var expandedDisp: PocketDispMode?
     @State private var confirmClearCache = false
+    #if OPENPOCKETCINE_DIAGNOSTICS
+        @State private var diagnosticsExportURLs: [URL] = []
+        @State private var diagnosticsExportError = ""
+        @State private var isPreparingDiagnosticsExport = false
+        @State private var showDiagnosticsExport = false
+        @State private var showDiagnosticsExportError = false
+    #endif
 
     var body: some View {
         ZStack(alignment: .topLeading) {
@@ -611,6 +618,36 @@ struct SettingsRootView: View {
                         model.liveOperatorPanel = nil
                     }
                 }
+                #if OPENPOCKETCINE_DIAGNOSTICS
+                    SettingsInlineRow(
+                        title: "Export Diagnostics",
+                        help: "Shares the Test build's control log and live frame-pacing CSV. No recording is required."
+                    ) {
+                        Button {
+                            exportDiagnostics()
+                        } label: {
+                            if isPreparingDiagnosticsExport {
+                                ProgressView()
+                                    .controlSize(.small)
+                                    .tint(LiveDesign.accent)
+                            } else {
+                                Text("Export")
+                                    .font(LiveType.ui(size: 13, weight: .semibold))
+                                    .foregroundStyle(LiveDesign.accent)
+                            }
+                        }
+                        .buttonStyle(.zcTapTarget)
+                        .disabled(isPreparingDiagnosticsExport)
+                    }
+                    .sheet(isPresented: $showDiagnosticsExport) {
+                        MediaShareSheet(urls: diagnosticsExportURLs)
+                    }
+                    .alert("Diagnostics unavailable", isPresented: $showDiagnosticsExportError) {
+                        Button("OK", role: .cancel) {}
+                    } message: {
+                        Text(diagnosticsExportError)
+                    }
+                #endif
             }
             dispSectionCard(
                 .live,
@@ -627,6 +664,24 @@ struct SettingsRootView: View {
             model.chromeEditorReturnMode = nil
         }
     }
+
+    #if OPENPOCKETCINE_DIAGNOSTICS
+        private func exportDiagnostics() {
+            guard !isPreparingDiagnosticsExport else { return }
+            isPreparingDiagnosticsExport = true
+            DiagnosticsExporter.prepare { result in
+                isPreparingDiagnosticsExport = false
+                switch result {
+                case .success(let urls):
+                    diagnosticsExportURLs = urls
+                    showDiagnosticsExport = true
+                case .failure(let error):
+                    diagnosticsExportError = error.localizedDescription
+                    showDiagnosticsExportError = true
+                }
+            }
+        }
+    #endif
 
     @ViewBuilder
     private func dispSectionCard(

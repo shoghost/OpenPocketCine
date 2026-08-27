@@ -183,6 +183,22 @@ final class LiveFramePacingDiagnostics: @unchecked Sendable {
         }
     }
 
+    /// Drains rows accumulated at the time of the call and completes after all earlier CSV writes.
+    /// Frame collection remains live; rows arriving later stay in the next batch.
+    func flushPending(completion: @escaping () -> Void) {
+        let rows = lock.withLock { state -> [String] in
+            let pending = state.csvRows
+            state.csvRows.removeAll(keepingCapacity: true)
+            return pending
+        }
+        writer.async { [fileName] in
+            if !rows.isEmpty {
+                Self.write(rows, fileName: fileName)
+            }
+            completion()
+        }
+    }
+
     private func note(_ stage: FramePacingStage, trace: LiveFrameTrace, at now: TimeInterval) {
         var rows: [String] = []
         var summary: String?
@@ -298,19 +314,23 @@ final class LiveFramePacingDiagnostics: @unchecked Sendable {
     private func flush(_ rows: [String]) {
         guard !rows.isEmpty else { return }
         writer.async { [fileName] in
-            guard let directory = FileManager.default.urls(
-                for: .documentDirectory, in: .userDomainMask
-            ).first else { return }
-            let url = directory.appendingPathComponent(fileName)
-            let header = "frame_id,source_timestamp,udp_arrival_s,au_complete_s,decoder_input_s,decoder_output_s,display_submit_s,udp_interval_ms,au_interval_ms,decoder_input_interval_ms,decoder_output_interval_ms,display_interval_ms,source_interval_ms,cause\n"
-            if !FileManager.default.fileExists(atPath: url.path) {
-                try? Data(header.utf8).write(to: url)
-            }
-            guard let handle = try? FileHandle(forWritingTo: url) else { return }
-            defer { try? handle.close() }
-            _ = try? handle.seekToEnd()
-            try? handle.write(contentsOf: Data((rows.joined(separator: "\n") + "\n").utf8))
+            Self.write(rows, fileName: fileName)
         }
+    }
+
+    private static func write(_ rows: [String], fileName: String) {
+        guard let directory = FileManager.default.urls(
+            for: .documentDirectory, in: .userDomainMask
+        ).first else { return }
+        let url = directory.appendingPathComponent(fileName)
+        let header = "frame_id,source_timestamp,udp_arrival_s,au_complete_s,decoder_input_s,decoder_output_s,display_submit_s,udp_interval_ms,au_interval_ms,decoder_input_interval_ms,decoder_output_interval_ms,display_interval_ms,source_interval_ms,cause\n"
+        if !FileManager.default.fileExists(atPath: url.path) {
+            try? Data(header.utf8).write(to: url)
+        }
+        guard let handle = try? FileHandle(forWritingTo: url) else { return }
+        defer { try? handle.close() }
+        _ = try? handle.seekToEnd()
+        try? handle.write(contentsOf: Data((rows.joined(separator: "\n") + "\n").utf8))
     }
 }
 #else

@@ -26,4 +26,19 @@ final class DiagnosticsTargetTests: XCTestCase {
         XCTAssertEqual(LiveFramePacingDiagnostics.djiRecordTimestamp(bytes), 0x1234_5678)
         XCTAssertNil(LiveFramePacingDiagnostics.djiRecordTimestamp([0, 0, 1, 0x67]))
     }
+
+    func testDiagnosticsExportRequiresBothExpectedFiles() throws {
+        XCTAssertEqual(
+            DiagnosticsExporter.fileNames,
+            ["control-live.log", "live-frame-pacing.csv"])
+
+        let result = DiagnosticsExporter.exportURLs(fileManager: .default)
+        if case .failure(let error) = result,
+            let exportError = error as? DiagnosticsExporter.ExportError,
+            case .filesMissing(let names) = exportError
+        {
+            XCTAssertFalse(names.isEmpty)
+            XCTAssertTrue(Set(names).isSubset(of: Set(DiagnosticsExporter.fileNames)))
+        }
+    }
 }
