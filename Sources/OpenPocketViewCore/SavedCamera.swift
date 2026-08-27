@@ -246,7 +246,7 @@ extension ConnectionPhase {
         switch self {
         case .idle, .scanning, .failed: 1
         case .connectingGatt, .pairing, .awaitingApproval: 2
-        case .readingWifiCreds, .joiningWifi: 3
+        case .readingWifiCreds, .joiningWifi, .manualWifiJoin: 3
         case .openingDatalink, .live: 4
         }
     }

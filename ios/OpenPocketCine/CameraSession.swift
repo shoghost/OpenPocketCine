@@ -44,6 +44,8 @@ final class CameraSession {
     private(set) var connectedCamera: FoundCamera?
     /// Camera-AP SSID after a successful join. Re-read over BLE on the next connect.
     private(set) var joinedSSID: String?
+    /// Presented only when free/ad-hoc signing prevents Hotspot Configuration from joining.
+    var manualWifiJoinPrompt: ManualWifiJoinPrompt?
 
     // Pipeline diagnostics — keepalive writes these at 1 Hz. Not observed by live chrome.
     @ObservationIgnored var videoPackets = 0
@@ -558,6 +560,7 @@ final class CameraSession {
         faceAFArmed = false
         firstPictureSettled = false
         needsForegroundRecover = false
+        manualWifiJoinPrompt = nil
         resetFeedWatchdog()
         resetMediaSession()
         if preserveDecoder {
@@ -590,6 +593,7 @@ final class CameraSession {
         faceAFArmed = false
         firstPictureSettled = false
         needsForegroundRecover = false
+        manualWifiJoinPrompt = nil
         resetLinkHealthMeasurements()
         resetFeedWatchdog()
         decoder.reset()
@@ -669,27 +673,49 @@ final class CameraSession {
         log.info(
             "wifi: switch to \(ssid, privacy: .public) kicking \(otherSSIDs.joined(separator: ","), privacy: .public)"
         )
-        try await WiFiJoiner.joinCameraAP(
-            ssid: ssid, passphrase: pass, wpa3: camera.model.wpa3,
-            knownOtherSSIDs: otherSSIDs, persist: persistHotspot
-        ) { [weak self] milestone in
-            guard let self else { return }
-            switch milestone {
-            case .applyStarted(let attempt):
-                self.beginConnectionDiagnostic(
-                    .hotspotApply, detail: "NEHotspotConfigurationManager.apply attempt \(attempt)")
-            case .applySucceeded(let attempt):
-                self.succeedConnectionDiagnostic(
-                    .hotspotApply, detail: "apply accepted on attempt \(attempt)")
-            case .pathVerificationStarted(let attempt):
-                self.beginConnectionDiagnostic(
-                    .wifiVerification, detail: "Waiting for 192.168.2.x (attempt \(attempt))")
-            case .pathReady(let attempt):
-                self.succeedConnectionDiagnostic(
-                    .wifiVerification,
-                    detail: "\(WiFiJoiner.cameraLocalIPv4() ?? "192.168.2.x") on attempt \(attempt)"
-                )
+        do {
+            try await WiFiJoiner.joinCameraAP(
+                ssid: ssid, passphrase: pass, wpa3: camera.model.wpa3,
+                knownOtherSSIDs: otherSSIDs, persist: persistHotspot
+            ) { [weak self] milestone in
+                guard let self else { return }
+                switch milestone {
+                case .applyStarted(let attempt):
+                    self.beginConnectionDiagnostic(
+                        .hotspotApply,
+                        detail: "NEHotspotConfigurationManager.apply attempt \(attempt)")
+                case .applySucceeded(let attempt):
+                    self.succeedConnectionDiagnostic(
+                        .hotspotApply, detail: "apply accepted on attempt \(attempt)")
+                case .pathVerificationStarted(let attempt):
+                    self.beginConnectionDiagnostic(
+                        .wifiVerification,
+                        detail: "Waiting for 192.168.2.x (attempt \(attempt))")
+                case .pathReady(let attempt):
+                    self.succeedConnectionDiagnostic(
+                        .wifiVerification,
+                        detail:
+                            "\(WiFiJoiner.cameraLocalIPv4() ?? "192.168.2.x") on attempt \(attempt)"
+                    )
+                }
             }
+        } catch let joinError as WiFiJoiner.JoinError where joinError.allowsManualWifiFallback {
+            // Preserve the exact Stage 6 failure for diagnostics, but do not fail the connection.
+            // Free/ad-hoc signing can strip Hotspot Configuration even though BLE credentials work.
+            failCurrentConnectionDiagnostic(joinError)
+            manualWifiJoinPrompt = ManualWifiJoinPrompt(ssid: ssid, password: pass)
+            phase = .manualWifiJoin
+            beginConnectionDiagnostic(
+                .wifiVerification,
+                detail: "Waiting for a manual join and a 192.168.2.x Wi-Fi address")
+            log.info(
+                "wifi: Hotspot Configuration internal error; waiting for manual join to \(ssid, privacy: .public)"
+            )
+            try await WiFiJoiner.waitUntilManualCameraPathReady()
+            succeedConnectionDiagnostic(
+                .wifiVerification,
+                detail: "\(WiFiJoiner.cameraLocalIPv4() ?? "192.168.2.x") after manual join")
+            manualWifiJoinPrompt = nil
         }
         joinedSSID = ssid
         timeline.mark("path", now: ProcessInfo.processInfo.systemUptime)
@@ -3350,11 +3376,23 @@ final class CameraSession {
     }
 
     func noteSceneBecameInactive() {
+        if case .manualWifiJoin = phase {
+            log.info("wifi: leaving foreground for manual join")
+            return
+        }
         if case .live = phase { needsForegroundRecover = true }
         log.info("live: scene inactive — will recover feed on active")
     }
 
     func noteSceneBecameActive() {
+        if case .manualWifiJoin = phase {
+            // The pending run task polls the Wi-Fi interface and proceeds directly to Stage 8.
+            // Merely returning from Settings must never invoke Hotspot Configuration again.
+            log.info(
+                "wifi: foreground during manual join; 192.168.2.x ready=\(WiFiJoiner.isCameraPathReady(), privacy: .public)"
+            )
+            return
+        }
         if isBrowsingMedia {
             needsForegroundRecover = false
             return

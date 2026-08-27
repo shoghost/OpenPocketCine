@@ -237,43 +237,48 @@ struct ConnectionSetupView: View {
 
     private var joinWifiStep: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text(
-                "We read the camera's SSID and password over Bluetooth, then join its Wi-Fi for you."
-            )
-            .font(LiveType.ui(size: tight ? 12 : 13, weight: .regular, design: .rounded))
-            .foregroundStyle(StartupColors.muted)
-            .fixedSize(horizontal: false, vertical: true)
+            if let prompt = model.session.manualWifiJoinPrompt {
+                ManualWifiJoinPanel(prompt: prompt)
+                ConnectionDiagnosticPanel(entries: model.session.connectionDiagnostics)
+            } else {
+                Text(
+                    "We read the camera's SSID and password over Bluetooth, then join its Wi-Fi for you."
+                )
+                .font(LiveType.ui(size: tight ? 12 : 13, weight: .regular, design: .rounded))
+                .foregroundStyle(StartupColors.muted)
+                .fixedSize(horizontal: false, vertical: true)
 
-            StartupWizardDeviceInstructionCard(
-                section: StartupWizardDeviceSection(
-                    id: "wifi-pocket",
-                    title: "On the camera",
-                    icon: .aperture,
-                    steps: [
-                        "Leave the camera on — it brings up its own Wi-Fi",
-                        "No menu tap needed on this path",
-                    ]
-                ),
-                tight: tight
-            )
-            StartupWizardDeviceInstructionCard(
-                section: StartupWizardDeviceSection(
-                    id: "wifi-iphone",
-                    title: "On iPhone",
-                    icon: .smartphone,
-                    steps: [
-                        "Tap Join when iOS asks to join the camera network",
-                        "Stay on this screen until we open the datalink",
-                    ]
-                ),
-                tight: tight
-            )
-            HStack(spacing: 10) {
-                ProgressView()
-                    .tint(StartupColors.accent)
-                Text(phase.label)
-                    .font(LiveType.ui(size: 13, weight: .semibold, design: .rounded))
-                    .foregroundStyle(StartupColors.ink)
+                StartupWizardDeviceInstructionCard(
+                    section: StartupWizardDeviceSection(
+                        id: "wifi-pocket",
+                        title: "On the camera",
+                        icon: .aperture,
+                        steps: [
+                            "Leave the camera on — it brings up its own Wi-Fi",
+                            "No menu tap needed on this path",
+                        ]
+                    ),
+                    tight: tight
+                )
+                StartupWizardDeviceInstructionCard(
+                    section: StartupWizardDeviceSection(
+                        id: "wifi-iphone",
+                        title: "On iPhone",
+                        icon: .smartphone,
+                        steps: [
+                            "Tap Join when iOS asks to join the camera network",
+                            "Stay on this screen until we open the datalink",
+                        ]
+                    ),
+                    tight: tight
+                )
+                HStack(spacing: 10) {
+                    ProgressView()
+                        .tint(StartupColors.accent)
+                    Text(phase.label)
+                        .font(LiveType.ui(size: 13, weight: .semibold, design: .rounded))
+                        .foregroundStyle(StartupColors.ink)
+                }
             }
         }
     }

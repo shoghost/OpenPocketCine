@@ -106,6 +106,8 @@ enum StartupConnectionCopy {
             return "Reading"
         case .joiningWifi:
             return "Joining"
+        case .manualWifiJoin:
+            return "Join manually"
         case .openingDatalink:
             return "Connecting"
         case .live:

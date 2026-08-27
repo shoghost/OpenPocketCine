@@ -173,7 +173,7 @@ struct ConnectionDiagnosticPanel: View {
                             .foregroundStyle(StartupColors.muted)
                         if error.isHotspotInternalError {
                             Text(
-                                "Hotspot Configuration returned internal. A missing entitlement after free signing is one possible cause; confirm the signed profile before enabling Manual Wi-Fi fallback."
+                                "Hotspot Configuration returned internal. Free-signed builds can continue with the Manual Wi-Fi join shown above."
                             )
                             .font(LiveType.ui(size: 10, weight: .semibold, design: .rounded))
                             .foregroundStyle(StartupColors.accent)

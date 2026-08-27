@@ -40,5 +40,23 @@ final class ConnectionDiagnosticTests: XCTestCase {
         XCTAssertEqual(info.domain, NEHotspotConfigurationErrorDomain)
         XCTAssertEqual(info.code, NEHotspotConfigurationError.internal.rawValue)
         XCTAssertEqual(info.description, "internal error")
+        XCTAssertTrue(error.allowsManualWifiFallback)
+    }
+
+    func testManualWifiFallbackIsLimitedToHotspotInternalError() {
+        XCTAssertFalse(
+            WiFiJoiner.JoinError.failed(
+                domain: NEHotspotConfigurationErrorDomain,
+                code: NEHotspotConfigurationError.userDenied.rawValue,
+                description: "denied"
+            ).allowsManualWifiFallback
+        )
+        XCTAssertFalse(
+            WiFiJoiner.JoinError.failed(
+                domain: "example.error", code: NEHotspotConfigurationError.internal.rawValue,
+                description: "internal"
+            ).allowsManualWifiFallback
+        )
+        XCTAssertFalse(WiFiJoiner.JoinError.pathNotReady.allowsManualWifiFallback)
     }
 }

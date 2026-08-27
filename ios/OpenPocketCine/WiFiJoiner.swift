@@ -42,6 +42,12 @@ enum WiFiJoiner {
         }
 
         var diagnosticDescription: String { errorDescription ?? "Wi-Fi join failed" }
+
+        var allowsManualWifiFallback: Bool {
+            guard case .failed(let domain, let code, _) = self else { return false }
+            return domain == NEHotspotConfigurationErrorDomain
+                && code == NEHotspotConfigurationError.internal.rawValue
+        }
     }
 
     enum JoinMilestone: Equatable, Sendable {
@@ -181,6 +187,27 @@ enum WiFiJoiner {
             try await Task.sleep(for: .milliseconds(100))
         }
         throw JoinError.pathNotReady
+    }
+
+    /// Wait without timing out while the operator joins the camera AP in Settings. This path is
+    /// used only after Hotspot Configuration's entitlement-sensitive `internal` error. The task
+    /// remains cancellable, and verifies the interface address rather than relying on SSID access.
+    static func waitUntilManualCameraPathReady() async throws {
+        if isCameraPathReady() { return }
+        log.info("wifi: waiting for manual join; checking for 192.168.2.x")
+        while true {
+            try Task.checkCancellation()
+            if isCameraPathReady() {
+                try await Task.sleep(for: .milliseconds(200))
+                if isCameraPathReady() {
+                    log.info(
+                        "wifi: manual camera path ready (\(ipv4Addresses().filter(CameraSoftAP.isAssociatedIPv4).joined(separator: ","), privacy: .public))"
+                    )
+                    return
+                }
+            }
+            try await Task.sleep(for: .milliseconds(250))
+        }
     }
 
     static func leave(ssid: String) {

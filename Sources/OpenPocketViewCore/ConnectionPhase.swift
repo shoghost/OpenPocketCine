@@ -10,6 +10,7 @@ public enum ConnectionPhase: Equatable, Sendable {
     case awaitingApproval  // camera showed a prompt — user must tap it
     case readingWifiCreds  // asking the camera for its SSID + passphrase
     case joiningWifi  // NEHotspotConfiguration
+    case manualWifiJoin  // operator joins the camera AP in Settings after entitlement failure
     case openingDatalink  // UDP handshake + register + subscribe
     case live  // registered; status pushes flowing
     case failed(String)
@@ -23,6 +24,7 @@ public enum ConnectionPhase: Equatable, Sendable {
         case .awaitingApproval: "Approve on the camera screen"
         case .readingWifiCreds: "Reading Wi-Fi credentials…"
         case .joiningWifi: "Joining camera Wi-Fi…"
+        case .manualWifiJoin: "Join camera Wi-Fi in Settings"
         case .openingDatalink: "Opening datalink…"
         case .live: "Connected"
         case .failed(let why): "Failed: \(why)"

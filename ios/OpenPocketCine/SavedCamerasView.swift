@@ -108,6 +108,10 @@ struct SavedCamerasView: View {
 
             ScrollView(showsIndicators: false) {
                 VStack(spacing: 12) {
+                    if let prompt = model.session.manualWifiJoinPrompt {
+                        ManualWifiJoinPanel(prompt: prompt)
+                        ConnectionDiagnosticPanel(entries: model.session.connectionDiagnostics)
+                    }
                     if case .failed = model.session.phase {
                         ConnectionDiagnosticPanel(entries: model.session.connectionDiagnostics)
                     }
@@ -207,7 +211,7 @@ private struct SavedCameraRow: View {
     /// Lock only once we're joining Wi-Fi or already live.
     private var isConnectLocked: Bool {
         switch model.session.phase {
-        case .joiningWifi, .openingDatalink, .live: true
+        case .joiningWifi, .manualWifiJoin, .openingDatalink, .live: true
         default: false
         }
     }
