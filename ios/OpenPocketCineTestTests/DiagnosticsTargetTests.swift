@@ -1,3 +1,5 @@
+import CoreVideo
+import OpenPocketViewCore
 import XCTest
 @testable import OpenPocketCineTest
 
@@ -48,5 +50,36 @@ final class DiagnosticsTargetTests: XCTestCase {
         XCTAssertEqual(NanoDisplayPacer.cadence, 1.0 / 30.0, accuracy: 0.000_001)
         XCTAssertEqual(NanoDisplayPacer.targetDepth, 24)
         XCTAssertEqual(NanoDisplayPacer.maximumDepth, 45)
+    }
+
+    func testNanoFrameBufferAcceptsDecodedFrameWithoutMainActorHop() throws {
+        var created: CVPixelBuffer?
+        XCTAssertEqual(
+            CVPixelBufferCreate(
+                kCFAllocatorDefault,
+                16,
+                16,
+                kCVPixelFormatType_32BGRA,
+                nil,
+                &created),
+            kCVReturnSuccess)
+        let pixelBuffer = try XCTUnwrap(created)
+        let storage = NanoDisplayFrameBuffer()
+        let pushed = expectation(description: "decoded frame pushed off main")
+        DispatchQueue.global(qos: .userInitiated).async {
+            storage.push(
+                imageBuffer: pixelBuffer,
+                effects: LiveImageEffects(),
+                transfer: .rec709,
+                trace: nil,
+                callbackAt: ProcessInfo.processInfo.systemUptime)
+            pushed.fulfill()
+        }
+        wait(for: [pushed], timeout: 1)
+
+        let metrics = storage.takeMetrics()
+        XCTAssertEqual(metrics.inputCount, 1)
+        XCTAssertEqual(metrics.depth, 1)
+        XCTAssertEqual(metrics.enqueueDurations.count, 1)
     }
 }

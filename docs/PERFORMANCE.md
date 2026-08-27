@@ -27,7 +27,9 @@ the same PR.
 The separate `OpenPocketCineTest` diagnostics target has one deliberate exception to the normal
 live-picture policy: Nano AVC is decoded immediately, then `NanoDisplayPacer` holds 24 decoded
 frames (about 800 ms; maximum 45 / 1.5 s) and releases at 30 Hz from `CADisplayLink`. It exists only
-to A/B the measured UDP arrival jitter; production decode and presentation remain unpaced.
+to A/B the measured UDP arrival jitter. The VideoToolbox callback writes directly into an
+`OSAllocatedUnfairLock`-protected queue; only display-clock pop and presentation use MainActor.
+Production decode and presentation remain unpaced.
 
 ## Threading
 

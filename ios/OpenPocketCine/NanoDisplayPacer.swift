@@ -1,178 +1,269 @@
 #if OPENPOCKETCINE_DIAGNOSTICS
+import CoreVideo
 import Foundation
+import OpenPocketViewCore
 import QuartzCore
 import UIKit
+import os
 
-/// Test-target-only presentation smoother for decoded Nano frames.
-///
-/// VideoToolbox and the network pipeline run at full speed. This queue starts only after 24
-/// decoded frames are available, then releases at most one frame per display-clock cadence.
-/// Entries contain independent CVPixelBuffer-backed presentation work, so dropping an old entry
-/// cannot break AVC reference decoding.
-@MainActor
-final class NanoDisplayPacer: NSObject {
-    static let framesPerSecond = 30.0
-    static let cadence = 1.0 / framesPerSecond
-    static let targetDepth = 24
-    static let maximumDepth = 45
-
-    private struct Entry {
-        let sourceOrder: Int64
-        let arrivalOrder: UInt64
-        let present: () -> Void
+/// Lock-protected decoded-frame storage written directly by the VideoToolbox callback.
+/// CVPixelBuffer is strongly retained by `Frame` while it is inside the bounded queue.
+final class NanoDisplayFrameBuffer: @unchecked Sendable {
+    struct Frame: @unchecked Sendable {
+        let imageBuffer: CVPixelBuffer
+        let effects: LiveImageEffects
+        let transfer: MonitorTransfer
+        let trace: LiveFrameTrace?
+        fileprivate let sourceOrder: Int64
+        fileprivate let arrivalOrder: UInt64
     }
 
-    private var entries: [Entry] = []
+    struct Metrics {
+        let inputCount: Int
+        let depth: Int
+        let overflowDropCount: Int
+        let lateSourceDropCount: Int
+        let vtCallbackIntervals: [TimeInterval]
+        let enqueueDurations: [TimeInterval]
+        let inputIntervals: [TimeInterval]
+    }
+
+    private struct State {
+        var entries: [Frame] = []
+        var sourceAnchorRaw: UInt32?
+        var sourceAnchorUnwrapped: Int64?
+        var lastPresentedSourceOrder: Int64?
+        var nextArrivalOrder: UInt64 = 0
+        var inputCount = 0
+        var overflowDropCount = 0
+        var lateSourceDropCount = 0
+        var lastVTCallbackAt: TimeInterval?
+        var lastInputAt: TimeInterval?
+        var vtCallbackIntervals: [TimeInterval] = []
+        var enqueueDurations: [TimeInterval] = []
+        var inputIntervals: [TimeInterval] = []
+    }
+
+    private let lock = OSAllocatedUnfairLock(initialState: State())
+
+    func push(
+        imageBuffer: CVPixelBuffer,
+        effects: LiveImageEffects,
+        transfer: MonitorTransfer,
+        trace: LiveFrameTrace?,
+        callbackAt: TimeInterval
+    ) {
+        lock.withLock { state in
+            state.inputCount += 1
+            if let previous = state.lastVTCallbackAt, callbackAt > previous {
+                Self.appendBounded(callbackAt - previous, to: &state.vtCallbackIntervals)
+            }
+            state.lastVTCallbackAt = callbackAt
+            state.nextArrivalOrder &+= 1
+            let order = Self.sourceOrder(
+                for: trace?.sourceTimestamp,
+                state: &state)
+            if let presented = state.lastPresentedSourceOrder, order <= presented {
+                state.lateSourceDropCount += 1
+                Self.noteEnqueueFinished(callbackAt: callbackAt, state: &state)
+                return
+            }
+            state.entries.append(
+                Frame(
+                    imageBuffer: imageBuffer,
+                    effects: effects,
+                    transfer: transfer,
+                    trace: trace,
+                    sourceOrder: order,
+                    arrivalOrder: state.nextArrivalOrder))
+            state.entries.sort {
+                if $0.sourceOrder == $1.sourceOrder {
+                    return $0.arrivalOrder < $1.arrivalOrder
+                }
+                return $0.sourceOrder < $1.sourceOrder
+            }
+            while state.entries.count > NanoDisplayPacer.maximumDepth {
+                state.entries.removeFirst()
+                state.overflowDropCount += 1
+            }
+            Self.noteEnqueueFinished(callbackAt: callbackAt, state: &state)
+        }
+    }
+
+    func popFirst() -> Frame? {
+        lock.withLock { state in
+            guard !state.entries.isEmpty else { return nil }
+            let frame = state.entries.removeFirst()
+            state.lastPresentedSourceOrder = frame.sourceOrder
+            return frame
+        }
+    }
+
+    func depth() -> Int { lock.withLock { $0.entries.count } }
+
+    func reset() {
+        lock.withLock { state in
+            state = State()
+        }
+    }
+
+    func takeMetrics() -> Metrics {
+        lock.withLock { state in
+            let metrics = Metrics(
+                inputCount: state.inputCount,
+                depth: state.entries.count,
+                overflowDropCount: state.overflowDropCount,
+                lateSourceDropCount: state.lateSourceDropCount,
+                vtCallbackIntervals: state.vtCallbackIntervals,
+                enqueueDurations: state.enqueueDurations,
+                inputIntervals: state.inputIntervals)
+            state.vtCallbackIntervals.removeAll(keepingCapacity: true)
+            state.enqueueDurations.removeAll(keepingCapacity: true)
+            state.inputIntervals.removeAll(keepingCapacity: true)
+            return metrics
+        }
+    }
+
+    private static func noteEnqueueFinished(callbackAt: TimeInterval, state: inout State) {
+        let finishedAt = ProcessInfo.processInfo.systemUptime
+        appendBounded(max(0, finishedAt - callbackAt), to: &state.enqueueDurations)
+        if let previous = state.lastInputAt, finishedAt > previous {
+            appendBounded(finishedAt - previous, to: &state.inputIntervals)
+        }
+        state.lastInputAt = finishedAt
+    }
+
+    private static func sourceOrder(for timestamp: UInt32?, state: inout State) -> Int64 {
+        guard let timestamp else {
+            return (state.entries.last?.sourceOrder ?? state.lastPresentedSourceOrder ?? 0) + 1
+        }
+        guard let anchorRaw = state.sourceAnchorRaw,
+            let anchor = state.sourceAnchorUnwrapped
+        else {
+            state.sourceAnchorRaw = timestamp
+            state.sourceAnchorUnwrapped = Int64(timestamp)
+            return Int64(timestamp)
+        }
+        let delta = Int64(Int32(bitPattern: timestamp &- anchorRaw))
+        let unwrapped = anchor + delta
+        if delta > 0 {
+            state.sourceAnchorRaw = timestamp
+            state.sourceAnchorUnwrapped = unwrapped
+        }
+        return unwrapped
+    }
+
+    private static func appendBounded(_ value: TimeInterval, to values: inout [TimeInterval]) {
+        values.append(value)
+        if values.count > 4_096 {
+            values.removeFirst(values.count - 4_096)
+        }
+    }
+}
+
+/// Test-target-only presentation clock for already-decoded Nano frames.
+/// Storage input is nonisolated; only CADisplayLink pop and UIKit presentation use MainActor.
+@MainActor
+final class NanoDisplayPacer: NSObject, @unchecked Sendable {
+    nonisolated static let framesPerSecond = 30.0
+    nonisolated static let cadence = 1.0 / framesPerSecond
+    nonisolated static let targetDepth = 24
+    nonisolated static let maximumDepth = 45
+
+    nonisolated private let storage = NanoDisplayFrameBuffer()
+    var onPresent: ((NanoDisplayFrameBuffer.Frame) -> Void)?
+
     private var displayLink: CADisplayLink?
     private var nextPresentationTime: CFTimeInterval?
-    private var sourceAnchorRaw: UInt32?
-    private var sourceAnchorUnwrapped: Int64?
-    private var lastPresentedSourceOrder: Int64?
-    private var nextArrivalOrder: UInt64 = 0
-    private var inputCount = 0
     private var outputCount = 0
     private var underflowCount = 0
-    private var overflowDropCount = 0
-    private var lateSourceDropCount = 0
     private var rebufferCount = 0
     private var rebufferStartedAt: CFTimeInterval?
     private var lastRebufferDurationMs = 0.0
-    private var inputIntervals: [TimeInterval] = []
     private var outputIntervals: [TimeInterval] = []
-    private var lastInputAt: CFTimeInterval?
+    private var displayTickIntervals: [TimeInterval] = []
     private var lastOutputAt: CFTimeInterval?
+    private var lastDisplayTickAt: CFTimeInterval?
     private var lastLogAt = CACurrentMediaTime()
 
-    func enqueue(sourceTimestamp: UInt32?, present: @escaping () -> Void) {
-        ensureDisplayLink()
-        let now = CACurrentMediaTime()
-        inputCount += 1
-        if let previous = lastInputAt, now > previous {
-            inputIntervals.append(now - previous)
-            if inputIntervals.count > 4_096 {
-                inputIntervals.removeFirst(inputIntervals.count - 4_096)
-            }
-        }
-        lastInputAt = now
-        nextArrivalOrder &+= 1
-        let order = sourceOrder(for: sourceTimestamp)
-        if let presented = lastPresentedSourceOrder, order <= presented {
-            lateSourceDropCount += 1
-            logIfNeeded(now: now)
-            return
-        }
-        let entry = Entry(
-            sourceOrder: order,
-            arrivalOrder: nextArrivalOrder,
-            present: present)
-        entries.append(entry)
-        entries.sort {
-            if $0.sourceOrder == $1.sourceOrder { return $0.arrivalOrder < $1.arrivalOrder }
-            return $0.sourceOrder < $1.sourceOrder
-        }
-
-        while entries.count > Self.maximumDepth {
-            entries.removeFirst()
-            overflowDropCount += 1
-        }
-
-        if nextPresentationTime == nil, entries.count >= Self.targetDepth {
-            if let startedAt = rebufferStartedAt {
-                lastRebufferDurationMs = max(0, now - startedAt) * 1_000
-                rebufferStartedAt = nil
-            }
-            // 24 decoded frames plus one cadence produces the requested ~800 ms reservoir.
-            nextPresentationTime = now + Self.cadence
-        }
-        displayLink?.isPaused = false
-        logIfNeeded(now: now)
-    }
-
-    func reset(reason: String) {
-        logSummary(reason: reason)
-        entries.removeAll(keepingCapacity: true)
-        nextPresentationTime = nil
-        sourceAnchorRaw = nil
-        sourceAnchorUnwrapped = nil
-        lastPresentedSourceOrder = nil
-        lastInputAt = nil
-        lastOutputAt = nil
-        inputIntervals.removeAll(keepingCapacity: true)
-        outputIntervals.removeAll(keepingCapacity: true)
-        inputCount = 0
-        outputCount = 0
-        underflowCount = 0
-        overflowDropCount = 0
-        lateSourceDropCount = 0
-        rebufferCount = 0
-        rebufferStartedAt = nil
-        lastRebufferDurationMs = 0
-        lastLogAt = CACurrentMediaTime()
-        displayLink?.isPaused = true
-    }
-
-    private func ensureDisplayLink() {
-        guard displayLink == nil else { return }
+    override init() {
+        super.init()
         let link = CADisplayLink(target: self, selector: #selector(displayTick(_:)))
         link.preferredFrameRateRange = CAFrameRateRange(
             minimum: Float(Self.framesPerSecond),
             maximum: Float(Self.framesPerSecond),
             preferred: Float(Self.framesPerSecond))
         link.add(to: .main, forMode: .common)
-        link.isPaused = true
         displayLink = link
     }
 
-    @objc private func displayTick(_ link: CADisplayLink) {
-        guard let deadline = nextPresentationTime else {
-            link.isPaused = entries.isEmpty
-            return
-        }
-        let now = link.targetTimestamp
-        guard now + 0.001 >= deadline else { return }
-
-        guard !entries.isEmpty else {
-            // The display layer naturally holds the last frame. Rebuffer before resuming.
-            underflowCount += 1
-            rebufferCount += 1
-            rebufferStartedAt = now
-            nextPresentationTime = nil
-            logIfNeeded(now: now)
-            return
-        }
-
-        let entry = entries.removeFirst()
-        entry.present()
-        lastPresentedSourceOrder = entry.sourceOrder
-        outputCount += 1
-        if let previous = lastOutputAt, now > previous {
-            outputIntervals.append(now - previous)
-            if outputIntervals.count > 4_096 {
-                outputIntervals.removeFirst(outputIntervals.count - 4_096)
-            }
-        }
-        lastOutputAt = now
-        // Anchor to this display tick. A delayed callback never causes catch-up burst output.
-        nextPresentationTime = now + Self.cadence
-        logIfNeeded(now: now)
+    /// Called synchronously inside the VT output callback. No Task or MainActor hop is performed.
+    nonisolated func enqueueFromVideoToolbox(
+        imageBuffer: CVPixelBuffer,
+        effects: LiveImageEffects,
+        transfer: MonitorTransfer,
+        trace: LiveFrameTrace?,
+        callbackAt: TimeInterval
+    ) {
+        storage.push(
+            imageBuffer: imageBuffer,
+            effects: effects,
+            transfer: transfer,
+            trace: trace,
+            callbackAt: callbackAt)
     }
 
-    private func sourceOrder(for timestamp: UInt32?) -> Int64 {
-        guard let timestamp else {
-            return (entries.last?.sourceOrder ?? lastPresentedSourceOrder ?? 0) + 1
+    func reset(reason: String) {
+        logSummary(reason: reason)
+        storage.reset()
+        nextPresentationTime = nil
+        lastOutputAt = nil
+        lastDisplayTickAt = nil
+        outputIntervals.removeAll(keepingCapacity: true)
+        displayTickIntervals.removeAll(keepingCapacity: true)
+        outputCount = 0
+        underflowCount = 0
+        rebufferCount = 0
+        rebufferStartedAt = nil
+        lastRebufferDurationMs = 0
+        lastLogAt = CACurrentMediaTime()
+    }
+
+    @objc private func displayTick(_ link: CADisplayLink) {
+        let now = link.targetTimestamp
+        if let previous = lastDisplayTickAt, now > previous {
+            appendBounded(now - previous, to: &displayTickIntervals)
         }
-        guard let anchorRaw = sourceAnchorRaw, let anchor = sourceAnchorUnwrapped else {
-            sourceAnchorRaw = timestamp
-            sourceAnchorUnwrapped = Int64(timestamp)
-            return Int64(timestamp)
+        lastDisplayTickAt = now
+
+        if nextPresentationTime == nil, storage.depth() >= Self.targetDepth {
+            if let startedAt = rebufferStartedAt {
+                lastRebufferDurationMs = max(0, now - startedAt) * 1_000
+                rebufferStartedAt = nil
+            }
+            // The current display tick presents frame one at about 800 ms initial depth.
+            nextPresentationTime = now
         }
-        let delta = Int64(Int32(bitPattern: timestamp &- anchorRaw))
-        let unwrapped = anchor + delta
-        if delta > 0 {
-            sourceAnchorRaw = timestamp
-            sourceAnchorUnwrapped = unwrapped
+
+        if let deadline = nextPresentationTime, now + 0.001 >= deadline {
+            if let frame = storage.popFirst() {
+                onPresent?(frame)
+                outputCount += 1
+                if let previous = lastOutputAt, now > previous {
+                    appendBounded(now - previous, to: &outputIntervals)
+                }
+                lastOutputAt = now
+                // Never catch up: one output maximum, next deadline anchored to this display tick.
+                nextPresentationTime = now + Self.cadence
+            } else {
+                // AVSampleBufferDisplayLayer holds the last frame while 24 frames are rebuffered.
+                underflowCount += 1
+                rebufferCount += 1
+                rebufferStartedAt = now
+                nextPresentationTime = nil
+            }
         }
-        return unwrapped
+        logIfNeeded(now: now)
     }
 
     private func logIfNeeded(now: CFTimeInterval) {
@@ -182,33 +273,38 @@ final class NanoDisplayPacer: NSObject {
     }
 
     private func logSummary(reason: String) {
-        let inputValues = inputIntervals.sorted()
-        let outputValues = outputIntervals.sorted()
-        inputIntervals.removeAll(keepingCapacity: true)
+        let metrics = storage.takeMetrics()
+        let vtCallbackStats = intervalStats(metrics.vtCallbackIntervals)
+        let enqueueStats = intervalStats(metrics.enqueueDurations)
+        let inputStats = intervalStats(metrics.inputIntervals)
+        let displayTickStats = intervalStats(displayTickIntervals)
+        let outputStats = intervalStats(outputIntervals)
+        displayTickIntervals.removeAll(keepingCapacity: true)
         outputIntervals.removeAll(keepingCapacity: true)
-        let inputStats = intervalStats(inputValues)
-        let outputStats = intervalStats(outputValues)
         let fields = [
             "reason=\(reason)",
-            "pacer_input=\(inputCount)",
+            "pacer_input=\(metrics.inputCount)",
             "pacer_output=\(outputCount)",
             "target_buffer_frames=\(Self.targetDepth)",
             "max_buffer_frames=\(Self.maximumDepth)",
-            "buffer_depth=\(entries.count)",
-            "current_buffer_duration_ms=\(bufferDurationMs)",
+            "buffer_depth=\(metrics.depth)",
+            "current_buffer_duration_ms=\(bufferDurationMs(metrics.depth))",
             "underflow_count=\(underflowCount)",
-            "overflow_drop_count=\(overflowDropCount)",
+            "overflow_drop_count=\(metrics.overflowDropCount)",
             "rebuffer_count=\(rebufferCount)",
             "rebuffer_duration_ms=\(rebufferDurationMs)",
-            "late_source_drop_count=\(lateSourceDropCount)",
-            "input_interval_ms{\(inputStats)}",
+            "late_source_drop_count=\(metrics.lateSourceDropCount)",
+            "vt_callback_interval_ms{\(vtCallbackStats)}",
+            "vt_to_buffer_enqueue_ms{\(enqueueStats)}",
+            "buffer_input_interval_ms{\(inputStats)}",
+            "display_tick_interval_ms{\(displayTickStats)}",
             "pacer_output_interval_ms{\(outputStats)}",
         ]
         ControlLiveLog.line("pacer: \(fields.joined(separator: " "))")
     }
 
-    private var bufferDurationMs: String {
-        String(format: "%.1f", Double(entries.count) * Self.cadence * 1_000)
+    private func bufferDurationMs(_ depth: Int) -> String {
+        String(format: "%.1f", Double(depth) * Self.cadence * 1_000)
     }
 
     private var rebufferDurationMs: String {
@@ -218,11 +314,12 @@ final class NanoDisplayPacer: NSObject {
     }
 
     private func intervalStats(_ values: [TimeInterval]) -> String {
-        [
-            "median=\(metric(values, 0.50))",
-            "p95=\(metric(values, 0.95))",
-            "p99=\(metric(values, 0.99))",
-            "max=\(maximum(values))",
+        let sorted = values.sorted()
+        return [
+            "median=\(metric(sorted, 0.50))",
+            "p95=\(metric(sorted, 0.95))",
+            "p99=\(metric(sorted, 0.99))",
+            "max=\(maximum(sorted))",
         ].joined(separator: " ")
     }
 
@@ -234,6 +331,13 @@ final class NanoDisplayPacer: NSObject {
 
     private func maximum(_ sorted: [TimeInterval]) -> String {
         String(format: "%.1f", (sorted.last ?? 0) * 1_000)
+    }
+
+    private func appendBounded(_ value: TimeInterval, to values: inout [TimeInterval]) {
+        values.append(value)
+        if values.count > 4_096 {
+            values.removeFirst(values.count - 4_096)
+        }
     }
 }
 #endif

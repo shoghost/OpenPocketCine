@@ -156,8 +156,11 @@ final class LiveFramePacingDiagnostics: @unchecked Sendable {
         note(.decoderInput, trace: trace, at: ProcessInfo.processInfo.systemUptime)
     }
 
-    func noteDecoderOutput(_ trace: LiveFrameTrace) {
-        note(.decoderOutput, trace: trace, at: ProcessInfo.processInfo.systemUptime)
+    func noteDecoderOutput(
+        _ trace: LiveFrameTrace,
+        at time: TimeInterval = ProcessInfo.processInfo.systemUptime
+    ) {
+        note(.decoderOutput, trace: trace, at: time)
     }
 
     func noteDisplaySubmit(_ trace: LiveFrameTrace) {

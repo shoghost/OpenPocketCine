@@ -131,7 +131,7 @@ final class HevcDecoder {
     private let loggedLiveVT = OSAllocatedUnfairLock(initialState: false)
     #if OPENPOCKETCINE_DIAGNOSTICS
         /// Nano-only, decoded-frame presentation pacing. Production never compiles this member.
-        private let nanoDisplayPacer = NanoDisplayPacer()
+        nonisolated private let nanoDisplayPacer: NanoDisplayPacer
     #endif
     /// Simulator (and any pixel-buffer-only source) paints identity on `CIFeedView`.
     private var prefersPixelBufferDisplay = false
@@ -202,7 +202,19 @@ final class HevcDecoder {
     private var vtAttemptedStamp: (vps: [UInt8], sps: [UInt8], pps: [UInt8])?
 
     init() {
+        #if OPENPOCKETCINE_DIAGNOSTICS
+            nanoDisplayPacer = NanoDisplayPacer()
+        #endif
         displayLayer.videoGravity = .resizeAspect
+        #if OPENPOCKETCINE_DIAGNOSTICS
+            nanoDisplayPacer.onPresent = { [weak self] frame in
+                self?.handleDecodedFrame(
+                    frame.imageBuffer,
+                    effects: frame.effects,
+                    transfer: frame.transfer,
+                    trace: frame.trace)
+            }
+        #endif
         // OpenZCine: fused-peaking self-check is ~0.5 s. Do it before the first PEAK frame.
         Task.detached(priority: .utility) { _ = LiveMonitorCompositor.fusedPeakingAvailable }
     }
@@ -1234,19 +1246,20 @@ final class HevcDecoder {
             }
             guard let imageBuffer, Self.isPresentable(imageBuffer) else { return }
             #if OPENPOCKETCINE_DIAGNOSTICS
-                if let trace { LiveFramePacingDiagnostics.shared.noteDecoderOutput(trace) }
-            #endif
-            self.logFirstLiveVT(imageBuffer)
-            #if OPENPOCKETCINE_DIAGNOSTICS
-                Task { @MainActor [weak self] in
-                    guard let self else { return }
-                    self.nanoDisplayPacer.enqueue(sourceTimestamp: trace?.sourceTimestamp) {
-                        [weak self] in
-                        self?.handleDecodedFrame(
-                            imageBuffer, effects: effects, transfer: transfer, trace: trace)
-                    }
+                let callbackAt = ProcessInfo.processInfo.systemUptime
+                self.nanoDisplayPacer.enqueueFromVideoToolbox(
+                    imageBuffer: imageBuffer,
+                    effects: effects,
+                    transfer: transfer,
+                    trace: trace,
+                    callbackAt: callbackAt)
+                if let trace {
+                    LiveFramePacingDiagnostics.shared.noteDecoderOutput(
+                        trace, at: callbackAt)
                 }
+                self.logFirstLiveVT(imageBuffer)
             #else
+                self.logFirstLiveVT(imageBuffer)
                 self.handleDecodedFrame(imageBuffer, effects: effects, transfer: transfer)
             #endif
         }
