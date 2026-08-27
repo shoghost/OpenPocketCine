@@ -58,6 +58,13 @@ Operator-visible UI changes are proven on a **physical** iPhone (and iPad when
 the layout is in play). Protocol tests (`just test`) do not need hardware.
 iPad hides the system time / battery bar; monitor chrome is the HUD.
 
+Failed physical-device connections show an eight-stage diagnostic from BLE
+connect through datalink. The failed row includes the NSError domain, code, and
+localized description. In particular, this distinguishes
+`NEHotspotConfigurationManager.apply` from DHCP/path verification; an `internal`
+Hotspot error alone is recorded as a possible signing-entitlement issue, not
+treated as proof and not used to silently change the connection path.
+
 Platform notes for the wire (Hotspot Configuration, Local Network, CoreBluetooth):
 [iOS protocol notes](../protocol/ios/).
 

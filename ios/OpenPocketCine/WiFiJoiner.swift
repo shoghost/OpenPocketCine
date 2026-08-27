@@ -13,18 +13,42 @@ import os
 /// `apply` success is not "associated with an address". First join is prompt + associate +
 /// DHCP; second connect is already on the AP (`alreadyAssociated`) and `192.168.2.x` is there.
 enum WiFiJoiner {
-    enum JoinError: LocalizedError {
-        case failed(String)
+    enum JoinError: LocalizedError, ConnectionDiagnosticError {
+        case failed(domain: String, code: Int, description: String)
         case pathNotReady
         case stillOnOtherBody(String)
         var errorDescription: String? {
             switch self {
-            case .failed(let s): s
+            case .failed(_, _, let description): description
             case .pathNotReady: "camera Wi-Fi joined but 192.168.2.x never appeared"
             case .stillOnOtherBody(let ssid):
                 "couldn't switch from \(ssid) — tap Connect again"
             }
         }
+
+        var diagnosticDomain: String {
+            switch self {
+            case .failed(let domain, _, _): domain
+            case .pathNotReady, .stillOnOtherBody: "com.opencapture.openpocketcine.WiFiJoiner"
+            }
+        }
+
+        var diagnosticCode: Int {
+            switch self {
+            case .failed(_, let code, _): code
+            case .pathNotReady: 1001
+            case .stillOnOtherBody: 1002
+            }
+        }
+
+        var diagnosticDescription: String { errorDescription ?? "Wi-Fi join failed" }
+    }
+
+    enum JoinMilestone: Equatable, Sendable {
+        case applyStarted(attempt: Int)
+        case applySucceeded(attempt: Int)
+        case pathVerificationStarted(attempt: Int)
+        case pathReady(attempt: Int)
     }
 
     private static let log = Logger(subsystem: "com.opencapture.openpocketcine", category: "wifi")
@@ -32,12 +56,14 @@ enum WiFiJoiner {
     /// Leave the other Osmo SoftAP and join `ssid`. Pocket and Nano share
     /// `192.168.2.1`, so a leftover camera DHCP address is not a stop — apply
     /// the target hotspot and let iOS switch. Do not send the operator to Settings.
+    @MainActor
     static func joinCameraAP(
         ssid: String,
         passphrase: String,
         wpa3: Bool,
         knownOtherSSIDs: [String],
-        persist: Bool = false
+        persist: Bool = false,
+        onMilestone: (JoinMilestone) -> Void = { _ in }
     ) async throws {
         var kick = Set(knownOtherSSIDs.filter { !$0.isEmpty && $0 != ssid })
         leave(ssids: Array(kick))
@@ -59,13 +85,17 @@ enum WiFiJoiner {
             leave(ssids: Array(kick))
             await leaveOtherOsmoSoftAPs(except: ssid)
             try? await Task.sleep(for: .milliseconds(250))
+            onMilestone(.applyStarted(attempt: attempt))
             try await join(ssid: ssid, passphrase: passphrase, wpa3: wpa3, persist: persist)
+            onMilestone(.applySucceeded(attempt: attempt))
+            onMilestone(.pathVerificationStarted(attempt: attempt))
             try await waitUntilCameraPathReady()
             let now = await currentSSID()
             if CameraSoftAPSwitch.isOnTarget(currentSSID: now, target: ssid) {
                 log.info(
                     "wifi: on \(ssid, privacy: .public) (current=\(now ?? "nil", privacy: .public)) #\(attempt)"
                 )
+                onMilestone(.pathReady(attempt: attempt))
                 return
             }
             lastForeign = now
@@ -109,7 +139,12 @@ enum WiFiJoiner {
                         c.resume()
                         return
                     }
-                    c.resume(throwing: JoinError.failed(error.localizedDescription))
+                    c.resume(
+                        throwing: JoinError.failed(
+                            domain: error.domain,
+                            code: error.code,
+                            description: error.localizedDescription
+                        ))
                 } else {
                     c.resume()
                 }

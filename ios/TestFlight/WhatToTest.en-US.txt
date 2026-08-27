@@ -1,7 +1,7 @@
 New and changed
 
+- Failed camera connections now show all eight BLE-to-datalink stages plus the exact error domain, code, and description. Reproduce the AltStore Nano failure and record the first red stage; Manual Wi-Fi mode remains disabled until Hotspot apply is confirmed as the failing stage.
 - Display settings now include Streaming Mode for Osmo Nano. In landscape it keeps the full 16:9 picture and hides recording, lens, assist, layer, and setup controls. Tap the picture for connection/battery status; tap Normal Mode to restore DISP 1/2.
-- Opening a clip plays the camera's small preview file so the monitor stays snappy. Share and Save still use the original camera file.
 - View Assist on a clip uses a monitor icon. LUT, false colour, peaking, and zebra grade the picture itself.
 - Long-press LUT: DJI / Creative / Custom. DJI Auto should grade D-Log / D-Log2 with the official cube. Creative is Mono / Contrast / Warm / Cool. Exposure is −3…+3 at ½ stop.
 - In Auto, the EV sheet has Face Priority. On, the drum grays out and EV follows faces to middle gray — fast for the first couple of seconds a face is in, then about one third-stop a second.

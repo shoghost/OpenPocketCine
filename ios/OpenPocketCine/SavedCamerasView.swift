@@ -108,6 +108,9 @@ struct SavedCamerasView: View {
 
             ScrollView(showsIndicators: false) {
                 VStack(spacing: 12) {
+                    if case .failed = model.session.phase {
+                        ConnectionDiagnosticPanel(entries: model.session.connectionDiagnostics)
+                    }
                     ForEach(model.savedCameras) { camera in
                         SavedCameraRow(
                             camera: camera,

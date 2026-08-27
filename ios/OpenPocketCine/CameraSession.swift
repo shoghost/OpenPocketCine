@@ -37,6 +37,9 @@ final class CameraSession {
         }
     }
     var found: [FoundCamera] = []
+    /// Eight-stage connection trace shown after a failed physical-device attempt.
+    var connectionDiagnostics: [ConnectionDiagnosticEntry] = []
+    @ObservationIgnored var activeConnectionDiagnosticStage: ConnectionDiagnosticStage?
     /// The body this session is connecting / connected to. Used to persist a saved camera.
     private(set) var connectedCamera: FoundCamera?
     /// Camera-AP SSID after a successful join. Re-read over BLE on the next connect.
@@ -394,6 +397,7 @@ final class CameraSession {
         reconnectTarget = nil
         isReconnecting = preserveMonitor
         connectedCamera = camera
+        resetConnectionDiagnostics()
         phase = .connectingGatt
         runTask = Task {
             defer {
@@ -409,7 +413,8 @@ final class CameraSession {
                     )
                     return
                 }
-                phase = .failed((error as? LocalizedError)?.errorDescription ?? "\(error)")
+                let failure = failCurrentConnectionDiagnostic(error)
+                phase = .failed(failure.failureSummary)
                 applyLinkPresentation()
             }
         }
@@ -593,7 +598,9 @@ final class CameraSession {
         // leftover P-frames cannot set lastPresentedAt and skip first-picture.
         decoder.beginIDRHold()
         phase = .connectingGatt
+        beginConnectionDiagnostic(.bleConnect, detail: camera.model.name)
         try await ble.connect(camera)
+        succeedConnectionDiagnostic(.bleConnect, detail: "GATT ready; FFF4/FFF5 active")
         timeline.mark("gatt", now: ProcessInfo.processInfo.systemUptime)
         try Task.checkCancellation()
         startFrameRouter()
@@ -604,14 +611,18 @@ final class CameraSession {
         // while the camera is still waiting. 0x46 can also arrive before 0x45.
         pairingHold.removeAll()
         phase = .pairing
+        beginConnectionDiagnostic(.pairing, detail: "Sending 0x07/0x45")
         ble.send(Commands.sessionWake())
         ble.send(Commands.setPairingPin(pin: camera.model.pairingToken))
+        succeedConnectionDiagnostic(.pairing, detail: "Pairing request sent")
         phase = .awaitingApproval
+        beginConnectionDiagnostic(.approval, detail: "Waiting for 0x07/0x45 or 0x07/0x46")
         do {
             try await completePairing()
         } catch Fail.timeout {
             throw Fail.pairingTimeout
         }
+        succeedConnectionDiagnostic(.approval, detail: "Approved or already paired")
         timeline.mark("pair", now: ProcessInfo.processInfo.systemUptime)
 
         // After pairing the camera is still dismissing Approve / bringing the AP up.
@@ -660,11 +671,31 @@ final class CameraSession {
         )
         try await WiFiJoiner.joinCameraAP(
             ssid: ssid, passphrase: pass, wpa3: camera.model.wpa3,
-            knownOtherSSIDs: otherSSIDs, persist: persistHotspot)
+            knownOtherSSIDs: otherSSIDs, persist: persistHotspot
+        ) { [weak self] milestone in
+            guard let self else { return }
+            switch milestone {
+            case .applyStarted(let attempt):
+                self.beginConnectionDiagnostic(
+                    .hotspotApply, detail: "NEHotspotConfigurationManager.apply attempt \(attempt)")
+            case .applySucceeded(let attempt):
+                self.succeedConnectionDiagnostic(
+                    .hotspotApply, detail: "apply accepted on attempt \(attempt)")
+            case .pathVerificationStarted(let attempt):
+                self.beginConnectionDiagnostic(
+                    .wifiVerification, detail: "Waiting for 192.168.2.x (attempt \(attempt))")
+            case .pathReady(let attempt):
+                self.succeedConnectionDiagnostic(
+                    .wifiVerification,
+                    detail: "\(WiFiJoiner.cameraLocalIPv4() ?? "192.168.2.x") on attempt \(attempt)"
+                )
+            }
+        }
         joinedSSID = ssid
         timeline.mark("path", now: ProcessInfo.processInfo.systemUptime)
 
         phase = .openingDatalink
+        beginConnectionDiagnostic(.datalink, detail: "Opening UDP control session")
         let existing = datalink
         let dl: DatalinkDriver
         if let existing, CameraSoftAP.shouldReuseDatalink(isClosed: existing.isClosed) {
@@ -680,6 +711,7 @@ final class CameraSession {
         // Handshake first (yesterday's working order). Mounting LiveView
         // before `open()` starved the UDP reader / ACK latch.
         try await openDatalinkKeepingLive(dl)
+        succeedConnectionDiagnostic(.datalink, detail: "Control session established")
         timeline.mark("hs", now: ProcessInfo.processInfo.systemUptime)
         if liveViewEnableSent {
             timeline.mark("enable", now: ProcessInfo.processInfo.systemUptime)
@@ -3929,10 +3961,14 @@ final class CameraSession {
     /// GetSSID/GetPassword with stale-hold cleared and 1-byte / 0xE0–0xEF fail-fast.
     private func wifiCredsAfterPairing(_ camera: FoundCamera) async throws -> (String, String) {
         let known = resolvedWifiCreds(for: camera)
+        beginConnectionDiagnostic(.wifiSSID)
         if known.skipBle, let ssid = known.ssid, let pass = known.password {
             log.info(
                 "creds: skipping BLE GetSSID/GetPassword — \(known.source, privacy: .public) SSID \(ssid, privacy: .public)"
             )
+            succeedConnectionDiagnostic(.wifiSSID, detail: "SSID: \(ssid) (\(known.source))")
+            beginConnectionDiagnostic(.wifiPassword)
+            succeedConnectionDiagnostic(.wifiPassword, detail: "Password received: yes (cached)")
             return (ssid, pass)
         }
 
@@ -3947,11 +3983,13 @@ final class CameraSession {
                 "creds: skipping GetSSID — using \(known.source, privacy: .public) SSID \(stored, privacy: .public)"
             )
             ssid = stored
+            succeedConnectionDiagnostic(.wifiSSID, detail: "SSID: \(stored) (\(known.source))")
         } else {
             do {
                 ssid = try await readWifiString(
                     name: "GetSSID", set: 0x07, cmd: 0x07, cached: known.ssid
                 ) { ble.send(Commands.getWifiSsid()) }
+                succeedConnectionDiagnostic(.wifiSSID, detail: "SSID: \(ssid)")
             } catch is CancellationError {
                 throw CancellationError()
             } catch let error as Fail where isDisconnect(error) {
@@ -3968,16 +4006,20 @@ final class CameraSession {
                     }
                     log.info("creds: GetSSID refused — using SSID \(fallback, privacy: .public)")
                     ssid = fallback
+                    succeedConnectionDiagnostic(
+                        .wifiSSID, detail: "SSID: \(fallback) (fallback after BLE reply failure)")
                 } else {
                     throw Fail.mimoSession
                 }
             }
         }
 
+        beginConnectionDiagnostic(.wifiPassword)
         do {
             let pass = try await readWifiString(
                 name: "GetPassword", set: 0x07, cmd: 0x0E, cached: known.password
             ) { ble.send(Commands.getWifiPassword()) }
+            succeedConnectionDiagnostic(.wifiPassword, detail: "Password received: yes")
             return (ssid, pass)
         } catch is CancellationError {
             throw CancellationError()
@@ -3987,6 +4029,8 @@ final class CameraSession {
             if let pass = known.password, !pass.isEmpty {
                 log.info(
                     "creds: GetPassword refused — using \(known.source, privacy: .public) password")
+                succeedConnectionDiagnostic(
+                    .wifiPassword, detail: "Password received: yes (\(known.source))")
                 return (ssid, pass)
             }
             throw Fail.mimoSession

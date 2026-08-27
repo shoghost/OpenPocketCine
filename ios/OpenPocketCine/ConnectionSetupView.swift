@@ -165,6 +165,7 @@ struct ConnectionSetupView: View {
                     text: StartupConnectionCopy.friendly(why),
                     tight: tight
                 )
+                ConnectionDiagnosticPanel(entries: model.session.connectionDiagnostics)
             }
 
             if model.session.found.isEmpty {
