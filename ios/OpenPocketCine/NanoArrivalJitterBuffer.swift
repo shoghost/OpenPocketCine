@@ -1,7 +1,6 @@
-#if OPENPOCKETCINE_DIAGNOSTICS
 import Foundation
 
-/// Test-only arrival-jitter buffer for complete Nano AVC access units.
+/// Source-clock arrival-jitter buffer for complete Nano AVC access units.
 ///
 /// The buffer restores the camera's own millisecond timestamp cadence after Wi-Fi arrival jitter.
 /// It does not synthesize frames, normalize to 30 fps, or change the existing decoder/presentation
@@ -9,6 +8,14 @@ import Foundation
 final class NanoArrivalJitterBuffer: @unchecked Sendable {
     static let delaySeconds = 0.200
     static let usesFixedRatePacer = false
+
+    static func djiRecordTimestamp(_ bytes: [UInt8]) -> UInt32? {
+        guard bytes.count >= 16, bytes[0] == 0, bytes[1] == 0, bytes[2] == 1,
+            bytes[3] == 0xff
+        else { return nil }
+        return UInt32(bytes[12]) | (UInt32(bytes[13]) << 8) | (UInt32(bytes[14]) << 16)
+            | (UInt32(bytes[15]) << 24)
+    }
 
     typealias Output = @Sendable (LivePacedAccessUnit) -> Void
 
@@ -74,14 +81,22 @@ final class NanoArrivalJitterBuffer: @unchecked Sendable {
         timer.setEventHandler { [weak self] in self?.releaseNext() }
         timer.schedule(deadline: .now() + .seconds(86_400))
         timer.resume()
-        ControlLiveLog.line(
-            "nano_test_mode=arrival_jitter_buffer_only jitter_buffer_delay_ms=200 fixed_fps_pacer=false timed_renderer=false production_presentation=true")
+        #if OPENPOCKETCINE_DIAGNOSTICS
+            ControlLiveLog.line(
+                "nano_test_mode=arrival_jitter_buffer_only jitter_buffer_delay_ms=200 fixed_fps_pacer=false timed_renderer=false production_presentation=true")
+        #else
+            ControlLiveLog.line(
+                "nano_arrival_jitter_buffer=true jitter_buffer_delay_ms=200 fixed_fps_pacer=false production_presentation=true")
+        #endif
     }
 
     /// Called directly with each complete AU on the datalink receive path.
     func push(_ accessUnit: LivePacedAccessUnit) {
         let arrival = ProcessInfo.processInfo.systemUptime
-        LiveFramePacingDiagnostics.shared.noteAccessUnitBufferInput(accessUnit.trace, at: arrival)
+        #if OPENPOCKETCINE_DIAGNOSTICS
+            LiveFramePacingDiagnostics.shared.noteAccessUnitBufferInput(
+                accessUnit.trace, at: arrival)
+        #endif
         queue.async { [weak self] in self?.accept(accessUnit, arrival: arrival) }
     }
 
@@ -157,7 +172,10 @@ final class NanoArrivalJitterBuffer: @unchecked Sendable {
         }
         lastOutputAt = now
         lastOutputSourceOrder = first.sourceOrder
-        LiveFramePacingDiagnostics.shared.noteAccessUnitBufferOutput(first.accessUnit.trace, at: now)
+        #if OPENPOCKETCINE_DIAGNOSTICS
+            LiveFramePacingDiagnostics.shared.noteAccessUnitBufferOutput(
+                first.accessUnit.trace, at: now)
+        #endif
         output(first.accessUnit)
         scheduleNext(now: now)
         logSummaryIfNeeded(now: now)
@@ -252,4 +270,3 @@ final class NanoArrivalJitterBuffer: @unchecked Sendable {
         return "median=\(value(0.50)) p95=\(value(0.95)) p99=\(value(0.99)) max=\(String(format: "%.1f", values.last ?? 0))"
     }
 }
-#endif

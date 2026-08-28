@@ -24,13 +24,12 @@ the same PR.
 | Zoom pinch | Distinct lens ticks at 20 Hz, no ACK wait | [`PARITY.md`](PARITY.md) |
 | Battery | Sticky `ACTION_BATTERY_CHANGED` (Android); no 1 Hz poll | [`ANDROID.md`](../ANDROID.md) |
 
-The separate `OpenPocketCineTest` diagnostics target has one deliberate exception to the normal
-live-picture policy. `NanoArrivalJitterBuffer` delays complete Nano AVC access units by 200 ms on a
-serial monotonic clock, then releases each AU according to the camera's original source timestamp.
-It neither normalizes to 30 fps nor duplicates/drops frames; a real 66–67 ms camera timestamp gap
-remains 66–67 ms. After release, Test uses the same `onAccessUnit → HevcDecoder → display layer`
-presentation path as Production. Earlier fixed-rate, decoded-frame, and future-PTS renderer
-experiments remain disconnected from the active Test route. Production remains unbuffered.
+`NanoArrivalJitterBuffer` delays complete Nano AVC access units by 200 ms on a serial monotonic
+clock, then releases each AU according to the camera's original source timestamp. It neither
+normalizes to 30 fps nor duplicates/drops frames; a real 66–67 ms camera timestamp gap remains
+66–67 ms. Production and Test then use the same `onAccessUnit → HevcDecoder → display layer`
+presentation path. Earlier fixed-rate, decoded-frame, and future-PTS renderer experiments remain
+disconnected from both active routes. Non-Nano live sources remain unbuffered.
 
 ## Threading
 

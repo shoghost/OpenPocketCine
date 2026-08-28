@@ -62,11 +62,9 @@ final class DatalinkDriver {
 
     /// Depacketize + video counters on the UDP queue. Main only hops complete AUs.
     nonisolated private let videoAssembler = SoftAPVideoAssembler()
-    #if OPENPOCKETCINE_DIAGNOSTICS
-        /// Test-only Nano path: restore source-clock cadence before the normal MainActor callback.
-        nonisolated private let nanoArrivalJitterBuffer = OSAllocatedUnfairLock(
-            initialState: NanoArrivalJitterBuffer?.none)
-    #endif
+    /// Nano path: restore source-clock cadence before the normal MainActor callback.
+    nonisolated private let nanoArrivalJitterBuffer = OSAllocatedUnfairLock(
+        initialState: NanoArrivalJitterBuffer?.none)
     /// Session/socket snapshot for the 40 Hz ACK pump (UDP queue, not MainActor).
     nonisolated private let wire = OSAllocatedUnfairLock(initialState: WireState())
     /// Last pid `0x38` GET write / reply. Keepalive BLE fallback reads these; UDP queue stamps reply.
@@ -94,12 +92,7 @@ final class DatalinkDriver {
     /// Called (on the main actor) for every DUML frame the camera pushes.
     /// Status, control ACKs, and media-list chunks (`0x00/0x27`) all arrive here.
     var onStatusFrame: ((Duml.Frame) -> Void)?
-    #if OPENPOCKETCINE_DIAGNOSTICS
     var onAccessUnit: ((LivePacedAccessUnit) -> Void)?
-    #else
-    /// Production callback remains the proven byte-only path.
-    var onAccessUnit: (([UInt8]) -> Void)?
-    #endif
 
     /// Snapshot of video-pipeline counters. Safe to read from the main actor for the HUD.
     var videoPackets: Int { videoAssembler.snapshot().packets }
@@ -149,25 +142,23 @@ final class DatalinkDriver {
         self.pairingToken = pairingToken
     }
 
-    #if OPENPOCKETCINE_DIAGNOSTICS
-        func enableDiagnosticNanoArrivalJitterBuffer() {
-            let buffer = NanoArrivalJitterBuffer { [weak self] accessUnit in
-                Task(priority: .userInitiated) { @MainActor [weak self] in
-                    self?.onAccessUnit?(accessUnit)
-                }
+    func enableNanoArrivalJitterBuffer() {
+        let buffer = NanoArrivalJitterBuffer { [weak self] accessUnit in
+            Task(priority: .userInitiated) { @MainActor [weak self] in
+                self?.onAccessUnit?(accessUnit)
             }
-            let old = nanoArrivalJitterBuffer.withLock { current -> NanoArrivalJitterBuffer? in
-                let previous = current
-                current = buffer
-                return previous
-            }
-            old?.stop()
         }
+        let old = nanoArrivalJitterBuffer.withLock { current -> NanoArrivalJitterBuffer? in
+            let previous = current
+            current = buffer
+            return previous
+        }
+        old?.stop()
+    }
 
-        func resetDiagnosticNanoArrivalJitterBuffer(reason: String) {
-            nanoArrivalJitterBuffer.withLock { $0 }?.reset(reason: reason)
-        }
-    #endif
+    func resetNanoArrivalJitterBuffer(reason: String) {
+        nanoArrivalJitterBuffer.withLock { $0 }?.reset(reason: reason)
+    }
 
     private var handshakeAcked: Bool {
         get { handshakeFlag.withLock { $0 } }
@@ -370,14 +361,12 @@ final class DatalinkDriver {
 
     func close() {
         closed = true
-        #if OPENPOCKETCINE_DIAGNOSTICS
-            let buffer = nanoArrivalJitterBuffer.withLock { current -> NanoArrivalJitterBuffer? in
-                let value = current
-                current = nil
-                return value
-            }
-            buffer?.stop()
-        #endif
+        let buffer = nanoArrivalJitterBuffer.withLock { current -> NanoArrivalJitterBuffer? in
+            let value = current
+            current = nil
+            return value
+        }
+        buffer?.stop()
         onAccessUnit = nil
         onStatusFrame = nil
         ackTimer?.cancel()
@@ -738,9 +727,7 @@ final class DatalinkDriver {
         // is scheduled on `q` immediately. `startReceiveLoop()` is MainActor-isolated — calling
         // it from the UDP callback hopped to main and froze the feed when the UI was busy.
         let assembler = videoAssembler
-        #if OPENPOCKETCINE_DIAGNOSTICS
-            let arrivalJitterBuffer = nanoArrivalJitterBuffer
-        #endif
+        let arrivalJitterBuffer = nanoArrivalJitterBuffer
         let handshake = handshakeFlag
         let inbound = handshakeInbound
         let gate = videoGate
@@ -810,15 +797,11 @@ final class DatalinkDriver {
                     }
                     return
                 }
-                #if OPENPOCKETCINE_DIAGNOSTICS
-                    let buffer = arrivalJitterBuffer.withLock { $0 }
-                    let assembled = assembler.ingest(bytes, queuePending: buffer == nil)
-                    if let buffer, let accessUnit = assembled.accessUnit {
-                        buffer.push(accessUnit)
-                    }
-                #else
-                    let assembled = assembler.ingest(bytes)
-                #endif
+                let buffer = arrivalJitterBuffer.withLock { $0 }
+                let assembled = assembler.ingest(bytes, queuePending: buffer == nil)
+                if let buffer, let accessUnit = assembled.accessUnit {
+                    buffer.push(accessUnit)
+                }
                 if assembled.firstPacket {
                     let count = bytes.count
                     Task { @MainActor in
@@ -1183,11 +1166,7 @@ final class DatalinkDriver {
 /// HEVC reassembly on the UDP queue. Main hops only complete access units (~25 Hz),
 /// not every SoftAP datagram.
 private final class SoftAPVideoAssembler: @unchecked Sendable {
-    #if OPENPOCKETCINE_DIAGNOSTICS
     typealias PendingAccessUnit = LivePacedAccessUnit
-    #else
-    typealias PendingAccessUnit = [UInt8]
-    #endif
 
     struct Snapshot {
         var packets = 0
@@ -1212,11 +1191,11 @@ private final class SoftAPVideoAssembler: @unchecked Sendable {
         var loggedFirst = false
         var peerCursor: UInt16 = 0
         var pending: [PendingAccessUnit] = []
+        var frameNumber: UInt8?
+        var frameID: UInt64 = 0
+        var frameArrival: TimeInterval = 0
+        var recordBytes: [UInt8] = []
         #if OPENPOCKETCINE_DIAGNOSTICS
-        var diagnosticFrameNumber: UInt8?
-        var diagnosticFrameID: UInt64 = 0
-        var diagnosticFrameArrival: TimeInterval = 0
-        var diagnosticRecordBytes: [UInt8] = []
         var seenPositions: Set<Int> = []
         var maxPosition: Int?
         #endif
@@ -1234,23 +1213,25 @@ private final class SoftAPVideoAssembler: @unchecked Sendable {
             }
             let first = !state.loggedFirst
             if first { state.loggedFirst = true }
-            #if OPENPOCKETCINE_DIAGNOSTICS
             let now = ProcessInfo.processInfo.systemUptime
             let frameNumber = datagram[16]
-            let position = Int(datagram[18]) * 2 + Int(datagram[17] >> 7)
-            let previousFrameID = state.diagnosticFrameID
-            let previousArrival = state.diagnosticFrameArrival
-            let previousRecord = state.diagnosticRecordBytes
-            if state.diagnosticFrameNumber != frameNumber {
-                state.diagnosticFrameNumber = frameNumber
-                state.diagnosticFrameID &+= 1
-                state.diagnosticFrameArrival = now
-                state.diagnosticRecordBytes.removeAll(keepingCapacity: true)
+            let previousFrameID = state.frameID
+            let previousArrival = state.frameArrival
+            let previousRecord = state.recordBytes
+            if state.frameNumber != frameNumber {
+                state.frameNumber = frameNumber
+                state.frameID &+= 1
+                state.frameArrival = now
+                state.recordBytes.removeAll(keepingCapacity: true)
+                #if OPENPOCKETCINE_DIAGNOSTICS
                 state.seenPositions.removeAll(keepingCapacity: true)
                 state.maxPosition = nil
                 LiveFramePacingDiagnostics.shared.noteUDPFrame(
-                    id: state.diagnosticFrameID, at: now)
+                    id: state.frameID, at: now)
+                #endif
             }
+            #if OPENPOCKETCINE_DIAGNOSTICS
+            let position = Int(datagram[18]) * 2 + Int(datagram[17] >> 7)
             if state.seenPositions.contains(position) {
                 LiveFramePacingDiagnostics.shared.noteDuplicateFragment()
             } else if let maxPosition = state.maxPosition, position < maxPosition {
@@ -1258,12 +1239,17 @@ private final class SoftAPVideoAssembler: @unchecked Sendable {
             }
             state.seenPositions.insert(position)
             state.maxPosition = max(state.maxPosition ?? position, position)
-            state.diagnosticRecordBytes.append(contentsOf: datagram[20...])
+            #endif
+            state.recordBytes.append(contentsOf: datagram[20...])
+            #if OPENPOCKETCINE_DIAGNOSTICS
             let droppedBefore = state.depacketizer.droppedIncomplete
+            #endif
             let bytes = state.depacketizer.feed(datagram)
+            #if OPENPOCKETCINE_DIAGNOSTICS
             if state.depacketizer.droppedIncomplete > droppedBefore {
                 LiveFramePacingDiagnostics.shared.noteIncompleteFrame(id: previousFrameID)
             }
+            #endif
             let au = bytes.map {
                 LivePacedAccessUnit(
                     bytes: $0,
@@ -1271,12 +1257,8 @@ private final class SoftAPVideoAssembler: @unchecked Sendable {
                         id: previousFrameID,
                         udpArrival: previousArrival,
                         accessUnitComplete: now,
-                        sourceTimestamp: LiveFramePacingDiagnostics.djiRecordTimestamp(
-                            previousRecord)))
+                        sourceTimestamp: NanoArrivalJitterBuffer.djiRecordTimestamp(previousRecord)))
             }
-            #else
-            let au = state.depacketizer.feed(datagram)
-            #endif
             var shouldHop = false
             if let au {
                 #if OPENPOCKETCINE_DIAGNOSTICS

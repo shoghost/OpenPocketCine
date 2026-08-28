@@ -3379,8 +3379,8 @@ final class CameraSession {
     }
 
     func noteSceneBecameInactive() {
+        datalink?.resetNanoArrivalJitterBuffer(reason: "background")
         #if OPENPOCKETCINE_DIAGNOSTICS
-            datalink?.resetDiagnosticNanoArrivalJitterBuffer(reason: "background")
             LiveFramePacingDiagnostics.shared.noteLifecycleBoundary()
         #endif
         if case .manualWifiJoin = phase {
@@ -3721,11 +3721,9 @@ final class CameraSession {
         dl.onStatusFrame = { [weak self] frame in
             self?.applyIncomingStatus(frame)
         }
-        #if OPENPOCKETCINE_DIAGNOSTICS
-            if connectedCamera?.model.family == .nano {
-                dl.enableDiagnosticNanoArrivalJitterBuffer()
-            }
-        #endif
+        if connectedCamera?.model.family == .nano {
+            dl.enableNanoArrivalJitterBuffer()
+        }
         dl.onAccessUnit = { [weak self] accessUnit in
             self?.ingestAccessUnit(accessUnit)
         }
@@ -3881,19 +3879,16 @@ final class CameraSession {
         }
     }
 
-    #if OPENPOCKETCINE_DIAGNOSTICS
     private func ingestAccessUnit(_ accessUnit: LivePacedAccessUnit) {
         rawAccessUnits += 1
+        #if OPENPOCKETCINE_DIAGNOSTICS
         if decoder.decode(accessUnit: accessUnit.bytes, trace: accessUnit.trace) {
             rawFramesEnqueued += 1
         }
+        #else
+        if decoder.decode(accessUnit: accessUnit.bytes) { rawFramesEnqueued += 1 }
+        #endif
     }
-    #else
-    private func ingestAccessUnit(_ accessUnit: [UInt8]) {
-        rawAccessUnits += 1
-        if decoder.decode(accessUnit: accessUnit) { rawFramesEnqueued += 1 }
-    }
-    #endif
 
     private func publishStatusNow() {
         lastStatusMutation = CFAbsoluteTimeGetCurrent()

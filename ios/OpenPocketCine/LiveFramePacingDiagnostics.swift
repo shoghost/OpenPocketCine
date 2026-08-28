@@ -132,11 +132,7 @@ final class LiveFramePacingDiagnostics: @unchecked Sendable {
     private init() {}
 
     static func djiRecordTimestamp(_ bytes: [UInt8]) -> UInt32? {
-        guard bytes.count >= 16, bytes[0] == 0, bytes[1] == 0, bytes[2] == 1,
-            bytes[3] == 0xff
-        else { return nil }
-        return UInt32(bytes[12]) | (UInt32(bytes[13]) << 8) | (UInt32(bytes[14]) << 16)
-            | (UInt32(bytes[15]) << 24)
+        NanoArrivalJitterBuffer.djiRecordTimestamp(bytes)
     }
 
     func reset() {
