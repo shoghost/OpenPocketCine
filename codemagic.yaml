@@ -58,14 +58,14 @@ workflows:
           fi
           xcrun simctl boot "$simulator_udid" 2>/dev/null || true
           xcrun simctl bootstatus "$simulator_udid" -b
-          rm -rf build/OpenPocketCineTests.xcresult
+          rm -rf build/ProductionTests.xcresult
           xcodebuild test \
             -project "$XCODE_PROJECT" \
-            -scheme "$XCODE_SCHEME" \
+            -scheme OpenPocketCine \
             -configuration Debug \
             -destination "platform=iOS Simulator,id=$simulator_udid" \
             -derivedDataPath "$SIMULATOR_DERIVED_DATA" \
-            -resultBundlePath build/OpenPocketCineTests.xcresult \
+            -resultBundlePath build/ProductionTests.xcresult \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO
@@ -109,7 +109,7 @@ workflows:
     artifacts:
       - build/OpenPocketCine-unsigned.ipa
       - build/ios-device/Build/Products/Release-iphoneos/OpenPocketCine.app
-      - build/OpenPocketCineTests.xcresult
+      - build/ProductionTests.xcresult
       - /tmp/xcodebuild_logs/*.log
 
   ios-test-unsigned:
