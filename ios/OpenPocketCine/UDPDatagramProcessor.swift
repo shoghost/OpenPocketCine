@@ -18,7 +18,9 @@ final class UDPDatagramProcessor: @unchecked Sendable {
         label: String = "opv.datalink.udp-processing",
         qos: DispatchQoS.QoSClass = .userInitiated
     ) {
-        queue = DispatchQueue(label: label, qos: qos)
+        queue = DispatchQueue(
+            label: label,
+            qos: DispatchQoS(qosClass: qos, relativePriority: 0))
     }
 
     func activate(generation next: Int) {
