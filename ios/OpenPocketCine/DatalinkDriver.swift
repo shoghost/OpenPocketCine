@@ -609,6 +609,9 @@ final class DatalinkDriver {
     private func startAckPump() {
         if closed { return }
         ackTimer?.cancel()
+        #if OPENPOCKETCINE_DIAGNOSTICS
+            NanoWindowAckDiagnostics.shared.reset()
+        #endif
         let t = DispatchSource.makeTimerSource(queue: q)
         t.schedule(deadline: .now() + .milliseconds(25), repeating: .milliseconds(25))
         t.setEventHandler { [weak self] in
@@ -641,6 +644,17 @@ final class DatalinkDriver {
                 pktType: 0x04, payloadLen: payload.count, sessionId: session, seq: 0
             ) + payload
         conn.send(content: Data(pkt), completion: .idempotent)
+        #if OPENPOCKETCINE_DIAGNOSTICS
+            let diagnostic = NanoWindowAckDiagnostics.shared.noteAck(
+                at: ProcessInfo.processInfo.systemUptime, ackSequence: 0,
+                windowSequence: cursor)
+            if let gap = diagnostic.gap {
+                ControlLiveLog.line(gap.logLine)
+            }
+            if let summary = diagnostic.summary {
+                ControlLiveLog.line(summary.logLine)
+            }
+        #endif
     }
 
     /// Mimo GETs pid `0x38` ~1 Hz on the live UDP socket — same conn as the
@@ -1316,11 +1330,12 @@ private final class SoftAPVideoAssembler: @unchecked Sendable {
             #if OPENPOCKETCINE_DIAGNOSTICS
             if state.depacketizer.droppedIncomplete > droppedBefore {
                 LiveFramePacingDiagnostics.shared.noteIncompleteFrame(id: previousFrameID)
+                let ackCorrelation = NanoWindowAckDiagnostics.shared.correlation(at: now)
                 if let event = diagnosticObservation.closedGroup {
-                    ControlLiveLog.line(event.logLine)
+                    ControlLiveLog.line("\(event.logLine) \(ackCorrelation.logFields)")
                 } else {
                     ControlLiveLog.line(
-                        "nano-incomplete-au: reason=unknown diagnostics_state_unavailable=true")
+                        "nano-incomplete-au: reason=unknown diagnostics_state_unavailable=true \(ackCorrelation.logFields)")
                 }
             }
             #endif
@@ -1396,7 +1411,9 @@ private final class SoftAPVideoAssembler: @unchecked Sendable {
             if let event = state.incompleteAUDiagnostics.discardCurrent(
                 reason: .reset, at: ProcessInfo.processInfo.systemUptime)
             {
-                ControlLiveLog.line(event.logLine)
+                let ackCorrelation = NanoWindowAckDiagnostics.shared.correlation(
+                    at: ProcessInfo.processInfo.systemUptime)
+                ControlLiveLog.line("\(event.logLine) \(ackCorrelation.logFields)")
             }
             state = State()
         }

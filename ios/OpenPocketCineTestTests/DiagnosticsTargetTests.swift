@@ -198,6 +198,59 @@ final class DiagnosticsTargetTests: XCTestCase {
             accuracy: 0.000_001)
     }
 
+    func testWindowAckDiagnosticsMeasuresFortyHertzAtTwentyFiveMilliseconds() {
+        let diagnostics = NanoWindowAckDiagnostics()
+        var summary: NanoWindowAckDiagnostics.Summary?
+        for index in 0...200 {
+            summary = diagnostics.noteAck(
+                at: Double(index) * 0.025, ackSequence: 0,
+                windowSequence: UInt16(index &* 8)).summary ?? summary
+        }
+        XCTAssertEqual(summary?.rateHz ?? 0, 40, accuracy: 0.001)
+        XCTAssertEqual(summary?.intervalMedianMilliseconds ?? 0, 25, accuracy: 0.001)
+    }
+
+    func testWindowAckDiagnosticsDetectsGapOverFiftyMilliseconds() {
+        let diagnostics = NanoWindowAckDiagnostics()
+        _ = diagnostics.noteAck(at: 10, ackSequence: 0, windowSequence: 100)
+        let result = diagnostics.noteAck(at: 10.051, ackSequence: 0, windowSequence: 108)
+        XCTAssertEqual(result.gap?.intervalMilliseconds ?? 0, 51, accuracy: 0.001)
+        XCTAssertEqual(result.gap?.previousWindowSequence, 100)
+        XCTAssertEqual(result.gap?.currentWindowSequence, 108)
+    }
+
+    func testWindowAckDiagnosticsDetectsGapOverOneHundredMilliseconds() {
+        let diagnostics = NanoWindowAckDiagnostics()
+        _ = diagnostics.noteAck(at: 20, ackSequence: 0, windowSequence: 200)
+        let result = diagnostics.noteAck(at: 20.125, ackSequence: 0, windowSequence: 208)
+        XCTAssertEqual(result.gap?.intervalMilliseconds ?? 0, 125, accuracy: 0.001)
+    }
+
+    func testWindowAckDiagnosticsSummaryCountsLongGaps() {
+        let diagnostics = NanoWindowAckDiagnostics()
+        _ = diagnostics.noteAck(at: 0, ackSequence: 0, windowSequence: 0)
+        _ = diagnostics.noteAck(at: 0.025, ackSequence: 0, windowSequence: 8)
+        _ = diagnostics.noteAck(at: 0.085, ackSequence: 0, windowSequence: 16)
+        _ = diagnostics.noteAck(at: 0.210, ackSequence: 0, windowSequence: 24)
+        let result = diagnostics.noteAck(at: 5.250, ackSequence: 0, windowSequence: 32)
+        XCTAssertEqual(result.summary?.gapsOver50Milliseconds, 3)
+        XCTAssertEqual(result.summary?.gapsOver100Milliseconds, 2)
+        XCTAssertEqual(result.summary?.gapsOver200Milliseconds, 1)
+    }
+
+    func testWindowAckDiagnosticsCorrelatesIncompleteAUWithRecentAckState() {
+        let diagnostics = NanoWindowAckDiagnostics()
+        for index in 0...40 {
+            _ = diagnostics.noteAck(
+                at: Double(index) * 0.025, ackSequence: 0,
+                windowSequence: UInt16(index &* 8))
+        }
+        let correlation = diagnostics.correlation(at: 1.100)
+        XCTAssertEqual(correlation.lastAckAgeMilliseconds ?? 0, 100, accuracy: 0.001)
+        XCTAssertEqual(correlation.ackRateLastSecondHz, 37, accuracy: 0.001)
+        XCTAssertEqual(correlation.maxAckGapLastSecondMilliseconds, 100, accuracy: 0.001)
+    }
+
     func testIncompleteAUDiagnosticsFindsOneMissingFragment() {
         var diagnostics = NanoIncompleteAUDiagnostics()
         _ = diagnostics.observe(incompletePacket(group: 1, wire: 40, sequence: 1_000))
