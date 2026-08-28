@@ -2,6 +2,7 @@
 import AVFoundation
 import CoreMedia
 import Foundation
+import OpenPocketViewCore
 
 /// Test-target-only timed presentation for complete Nano AVC access units.
 ///
