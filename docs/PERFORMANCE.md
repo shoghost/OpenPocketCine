@@ -33,8 +33,9 @@ disconnected from both active routes. Non-Nano live sources remain unbuffered.
 
 ## Threading
 
-UDP receive re-arms on the network queue, not after a main-actor hop. A busy HUD
-must not stop the socket.
+UDP receive re-arms on the network queue before retained `Data` is handed to the user-initiated
+serial datalink processing queue, not after parse, assembly, or a main-actor hop. A busy HUD or
+video burst must not stop the socket callback.
 
 Depacketize and scope accumulation stay off the UI thread. Compose/SwiftUI
 invalidates at the HUD budget, not per video packet.

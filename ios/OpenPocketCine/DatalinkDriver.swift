@@ -30,6 +30,7 @@ final class DatalinkDriver {
     private let tcpPoke: Bool
     private let pairingToken: String
     private let q = DispatchQueue(label: "opv.datalink.udp")
+    nonisolated private let udpProcessor = UDPDatagramProcessor()
     private var conn: NWConnection?
     private var pokeConn: NWConnection?  // kept open for the session; Mimo does not RST 7001
     private var ackTimer: DispatchSourceTimer?
@@ -217,10 +218,10 @@ final class DatalinkDriver {
         var haveSocket = false
         while true {
             try throwIfClosed()
-            resetHandshakeSession()
             // Do not discard before the first bind — that was a no-op on a
             // fresh driver but raced the reader on session retry.
             if haveSocket { discardUDP() }
+            resetHandshakeSession()
             try await openUDP()
             try throwIfClosed()
             haveSocket = true
@@ -456,6 +457,7 @@ final class DatalinkDriver {
     /// Drop the live UDP socket only. TCP 7001 stays up for the session.
     private func discardUDP() {
         udpGeneration += 1
+        udpProcessor.activate(generation: udpGeneration)
         receiveArmed = false
         let old = conn
         conn = nil
@@ -613,7 +615,8 @@ final class DatalinkDriver {
             NanoWindowAckDiagnostics.shared.reset()
         #endif
         let t = DispatchSource.makeTimerSource(queue: q)
-        t.schedule(deadline: .now() + .milliseconds(25), repeating: .milliseconds(25))
+        let interval = DatalinkTransportPolicy.windowAckIntervalMilliseconds
+        t.schedule(deadline: .now() + .milliseconds(interval), repeating: .milliseconds(interval))
         t.setEventHandler { [weak self] in
             self?.sendWindowAck()
             self?.tickSelfieFlipGET()
@@ -773,8 +776,8 @@ final class DatalinkDriver {
     private func startReceiveLoop() {
         guard let conn else { return }
         // Capture the connection and re-arm from a nonisolated static so the next receiveMessage
-        // is scheduled on `q` immediately. `startReceiveLoop()` is MainActor-isolated — calling
-        // it from the UDP callback hopped to main and froze the feed when the UI was busy.
+        // is scheduled on `q` immediately. Retained Data then moves to the ordered processing
+        // queue; parsing here used to occupy the receive/ACK queue during a video burst.
         let assembler = videoAssembler
         let arrivalJitterBuffer = nanoArrivalJitterBuffer
         let handshake = handshakeFlag
@@ -783,32 +786,12 @@ final class DatalinkDriver {
         let flipReplyAt = lastSelfieFlipReply
         let generation = udpGeneration
         let socket = conn
+        let processor = udpProcessor
+        processor.activate(generation: generation)
         receiveArmed = true
         log.info("datalink: UDP reader armed")
-        Self.armReceive(
-            conn, queue: q,
-            onError: { [weak self] message in
-                let canceled = CameraSoftAP.isCanceledReceive(message)
-                let awaitingAck = !handshake.withLock { $0 }
-                Task { @MainActor in
-                    guard let self else { return }
-                    let live = self.udpGeneration == generation && self.conn === socket
-                    if awaitingAck {
-                        self.log.info(
-                            "datalink: handshake UDP recv error canceled=\(canceled) live=\(live) (\(message, privacy: .public))"
-                        )
-                    }
-                    guard
-                        CameraSoftAP.shouldCountReceiveError(
-                            isLiveConnection: live, canceled: canceled)
-                    else { return }
-                    self.receiveErrors += 1
-                    self.log.info(
-                        "datalink: UDP receive error #\(self.receiveErrors, privacy: .public) (\(message, privacy: .public)) — re-arm"
-                    )
-                }
-            }
-        ) { [weak self] bytes in
+        let processDatagram: @Sendable (Data) -> Void = { [weak self] data in
+            let bytes = [UInt8](data)
             let awaitingAck = !handshake.withLock { $0 }
             if awaitingAck {
                 inbound.withLock { $0 += 1 }
@@ -883,7 +866,8 @@ final class DatalinkDriver {
                 )
             }
             let flipReply = frames.contains {
-                CameraParam.isSelfieFlipGetReply(set: $0.cmdSet, cmd: $0.cmdId, payload: $0.payload)
+                CameraParam.isSelfieFlipGetReply(
+                    set: $0.cmdSet, cmd: $0.cmdId, payload: $0.payload)
             }
             if flipReply {
                 flipReplyAt.withLock { $0 = Date() }
@@ -891,6 +875,32 @@ final class DatalinkDriver {
             Task(priority: .high) { @MainActor in
                 self?.ingest(bytes)
             }
+        }
+        Self.armReceive(
+            conn, queue: q,
+            onError: { [weak self] message in
+                let canceled = CameraSoftAP.isCanceledReceive(message)
+                let awaitingAck = !handshake.withLock { $0 }
+                Task { @MainActor in
+                    guard let self else { return }
+                    let live = self.udpGeneration == generation && self.conn === socket
+                    if awaitingAck {
+                        self.log.info(
+                            "datalink: handshake UDP recv error canceled=\(canceled) live=\(live) (\(message, privacy: .public))"
+                        )
+                    }
+                    guard
+                        CameraSoftAP.shouldCountReceiveError(
+                            isLiveConnection: live, canceled: canceled)
+                    else { return }
+                    self.receiveErrors += 1
+                    self.log.info(
+                        "datalink: UDP receive error #\(self.receiveErrors, privacy: .public) (\(message, privacy: .public)) — re-arm"
+                    )
+                }
+            }
+        ) { data in
+            processor.submit(data, generation: generation, handler: processDatagram)
         }
     }
 
@@ -900,7 +910,7 @@ final class DatalinkDriver {
         _ conn: NWConnection,
         queue: DispatchQueue,
         onError: @escaping @Sendable (String) -> Void,
-        ingest: @escaping @Sendable ([UInt8]) -> Void
+        ingest: @escaping @Sendable (Data) -> Void
     ) {
         conn.receiveMessage { data, _, _, error in
             // Re-arm BEFORE ingest. Ingest-first froze videoPkts at the first
@@ -918,7 +928,7 @@ final class DatalinkDriver {
             } else {
                 armReceive(conn, queue: queue, onError: onError, ingest: ingest)
             }
-            if let data, !data.isEmpty { ingest([UInt8](data)) }
+            if let data, !data.isEmpty { ingest(data) }
         }
     }
 

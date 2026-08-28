@@ -71,6 +71,14 @@ iOS is the operator-proven datalink (`DatalinkDriver.swift`
 `recoverAfterForeground`). Android must match that 5-tuple and lifecycle, not
 reimplement the ladder in `LiveViewEnablePolicy`.
 
+The iOS `NWConnection.receiveMessage` callback re-arms the next receive before handing the retained
+`Data` to the user-initiated serial `opv.datalink.udp-processing` queue. Transport parsing and
+`SoftAPVideoAssembler` run on that queue in arrival order; a generation gate drains an in-flight
+datagram and rejects queued packets from a discarded socket before a replacement session starts.
+Network.framework does not expose a public per-connection file descriptor or `SO_RCVBUF` option, so
+the app does not use private API or replace the established 5-tuple with a BSD socket solely to tune
+the kernel receive buffer.
+
 Mid-session SoftAP `onLost` is a Network-object replace until the grace
 expires — do not `bindProcessToNetwork(null)` while `isProcessBound` still
 reads true, or UDP rebuilds on home Wi-Fi.
