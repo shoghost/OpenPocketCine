@@ -3,6 +3,18 @@ import Network
 import OpenPocketViewCore
 import os
 
+#if OPENPOCKETCINE_DIAGNOSTICS
+    typealias DatalinkNanoDiagnosticDelivery = @Sendable (LivePacedAccessUnit) -> Void
+
+    private final class DatalinkNanoDiagnosticDeliveryBox: @unchecked Sendable {
+        private let lock = OSAllocatedUnfairLock(
+            initialState: DatalinkNanoDiagnosticDelivery?.none)
+
+        func load() -> DatalinkNanoDiagnosticDelivery? { lock.withLock { $0 } }
+        func store(_ value: DatalinkNanoDiagnosticDelivery?) { lock.withLock { $0 = value } }
+    }
+#endif
+
 /// The DUML-over-UDP datalink on iOS: opens the socket to 192.168.2.1, runs the handshake, registers
 /// the app, subscribes to status, and pumps keepalives — using the byte builders from the (tested)
 /// core. This is the stateful half the core deliberately leaves out (session id, the sequence
@@ -65,6 +77,11 @@ final class DatalinkDriver {
     /// Nano path: restore source-clock cadence before the normal MainActor callback.
     nonisolated private let nanoArrivalJitterBuffer = OSAllocatedUnfairLock(
         initialState: NanoArrivalJitterBuffer?.none)
+    #if OPENPOCKETCINE_DIAGNOSTICS
+        /// Test-only direct handoff after the source-clock buffer. The lock is read on the buffer's
+        /// queue, so renderer delivery does not wait for MainActor.
+        nonisolated private let nanoDiagnosticDelivery = DatalinkNanoDiagnosticDeliveryBox()
+    #endif
     /// Session/socket snapshot for the 40 Hz ACK pump (UDP queue, not MainActor).
     nonisolated private let wire = OSAllocatedUnfairLock(initialState: WireState())
     /// Last pid `0x38` GET write / reply. Keepalive BLE fallback reads these; UDP queue stamps reply.
@@ -143,7 +160,16 @@ final class DatalinkDriver {
     }
 
     func enableNanoArrivalJitterBuffer() {
+        #if OPENPOCKETCINE_DIAGNOSTICS
+            let directDelivery = nanoDiagnosticDelivery
+        #endif
         let buffer = NanoArrivalJitterBuffer { [weak self] accessUnit in
+            #if OPENPOCKETCINE_DIAGNOSTICS
+                if let callback = directDelivery.load() {
+                    callback(accessUnit)
+                    return
+                }
+            #endif
             Task(priority: .userInitiated) { @MainActor [weak self] in
                 self?.onAccessUnit?(accessUnit)
             }
@@ -155,6 +181,12 @@ final class DatalinkDriver {
         }
         old?.stop()
     }
+
+    #if OPENPOCKETCINE_DIAGNOSTICS
+        func setNanoDiagnosticDelivery(_ delivery: DatalinkNanoDiagnosticDelivery?) {
+            nanoDiagnosticDelivery.store(delivery)
+        }
+    #endif
 
     func resetNanoArrivalJitterBuffer(reason: String) {
         nanoArrivalJitterBuffer.withLock { $0 }?.reset(reason: reason)
@@ -367,6 +399,9 @@ final class DatalinkDriver {
             return value
         }
         buffer?.stop()
+        #if OPENPOCKETCINE_DIAGNOSTICS
+            nanoDiagnosticDelivery.store(nil)
+        #endif
         onAccessUnit = nil
         onStatusFrame = nil
         ackTimer?.cancel()

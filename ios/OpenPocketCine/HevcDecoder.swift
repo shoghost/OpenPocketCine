@@ -192,6 +192,11 @@ final class HevcDecoder {
     private var builtPPS: [UInt8]?
     /// Parameter sets we already tried to open a VT session for. Repeated PPS must not retry.
     private var vtAttemptedStamp: (vps: [UInt8], sps: [UInt8], pps: [UInt8])?
+    #if OPENPOCKETCINE_DIAGNOSTICS
+        /// State mirror for the Test-only background Nano identity delivery. It updates watchdog/UI
+        /// health only after renderer enqueue; no per-frame work before enqueue hops to MainActor.
+        private var diagnosticNanoParameterChangePending = false
+    #endif
 
     init() {
         displayLayer.videoGravity = .resizeAspect
@@ -286,6 +291,46 @@ final class HevcDecoder {
     func decode(accessUnit: [UInt8]) -> Bool {
         decodeImpl(accessUnit: accessUnit, trace: nil)
     }
+    #endif
+
+    #if OPENPOCKETCINE_DIAGNOSTICS
+        func noteNanoImmediateFormat(
+            width: Int32, height: Int32, nalTypes: Set<Int>, changed: Bool
+        ) {
+            liveCodec = .avc
+            hasFormat = true
+            nalTypesSeen.formUnion(nalTypes)
+            let next = CGSize(width: CGFloat(width), height: CGFloat(height))
+            if next.width > 1, next.height > 1 {
+                pictureSize = next
+                isVerticalPicture = EncoderPresentPath.isVertical(
+                    width: Int(width), height: Int(height))
+            }
+            if changed {
+                awaitingIDR = true
+                diagnosticNanoParameterChangePending = true
+            }
+        }
+
+        func noteNanoImmediateEnqueue(isIDR: Bool, nalTypes: Set<Int>) {
+            liveCodec = .avc
+            nalTypesSeen.formUnion(nalTypes)
+            if isIDR {
+                sawKeyframe = true
+                lastKeyframeAt = Date()
+                awaitingIDR = false
+            }
+            if diagnosticNanoParameterChangePending {
+                diagnosticNanoParameterChangePending = false
+                if !isIDR { onParameterSetsChanged?() }
+            }
+            notePresentedFrame(sampleRate: true)
+        }
+
+        func noteNanoImmediateReset() {
+            diagnosticNanoParameterChangePending = false
+            awaitingIDR = true
+        }
     #endif
 
     private func decodeImpl(accessUnit: [UInt8], trace: LiveFrameTrace?) -> Bool {
@@ -488,6 +533,9 @@ final class HevcDecoder {
         vtAttemptedStamp = nil
         vtRebuildCount = 0
         frameIndex = 0
+        #if OPENPOCKETCINE_DIAGNOSTICS
+            diagnosticNanoParameterChangePending = false
+        #endif
         loggedLiveVT.withLock { $0 = false }
         assistEngine.reset()
         sampleBus?.reset()

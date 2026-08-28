@@ -22,6 +22,9 @@ enum FramePacingStage: String, CaseIterable, Sendable {
     case accessUnitComplete = "access_unit_complete"
     case accessUnitBufferInput = "au_buffer_input"
     case accessUnitBufferOutput = "au_buffer_output"
+    case deliveryQueueInput = "delivery_queue_input"
+    case sampleBuild = "sample_build"
+    case rendererEnqueue = "renderer_enqueue"
     case decoderInput = "decoder_input"
     case decoderOutput = "decoder_output"
     case displaySubmit = "display_submit"
@@ -164,6 +167,18 @@ final class LiveFramePacingDiagnostics: @unchecked Sendable {
 
     func noteAccessUnitBufferOutput(_ trace: LiveFrameTrace, at time: TimeInterval) {
         note(.accessUnitBufferOutput, trace: trace, at: time)
+    }
+
+    func noteDeliveryQueueInput(_ trace: LiveFrameTrace, at time: TimeInterval) {
+        note(.deliveryQueueInput, trace: trace, at: time)
+    }
+
+    func noteSampleBuild(_ trace: LiveFrameTrace, at time: TimeInterval) {
+        note(.sampleBuild, trace: trace, at: time)
+    }
+
+    func noteRendererEnqueue(_ trace: LiveFrameTrace, at time: TimeInterval) {
+        note(.rendererEnqueue, trace: trace, at: time)
     }
 
     func noteDecoderInput(_ trace: LiveFrameTrace) {
@@ -352,9 +367,11 @@ final class LiveFramePacingDiagnostics: @unchecked Sendable {
         return [
             String(id), frame.sourceTimestamp.map { String($0) } ?? "",
             value(.udpFrameArrival), value(.accessUnitComplete), value(.accessUnitBufferInput),
-            value(.accessUnitBufferOutput), value(.decoderInput), value(.decoderOutput),
+            value(.accessUnitBufferOutput), value(.deliveryQueueInput), value(.sampleBuild),
+            value(.rendererEnqueue), value(.decoderInput), value(.decoderOutput),
             value(.displaySubmit), interval(.udpFrameArrival), interval(.accessUnitComplete),
             interval(.accessUnitBufferInput), interval(.accessUnitBufferOutput),
+            interval(.deliveryQueueInput), interval(.sampleBuild), interval(.rendererEnqueue),
             interval(.decoderInput), interval(.decoderOutput), interval(.displaySubmit),
             frame.sourceDeltaMs.map { String(format: "%.3f", $0) } ?? "",
             cause.rawValue,
@@ -373,6 +390,9 @@ final class LiveFramePacingDiagnostics: @unchecked Sendable {
             case .accessUnitComplete: name = "au_complete_interval_ms"
             case .accessUnitBufferInput: name = "au_buffer_input_interval_ms"
             case .accessUnitBufferOutput: name = "au_buffer_output_interval_ms"
+            case .deliveryQueueInput: name = "delivery_queue_input_interval_ms"
+            case .sampleBuild: name = "sample_build_interval_ms"
+            case .rendererEnqueue: name = "renderer_enqueue_interval_ms"
             case .decoderInput: name = "decoder_input_interval_ms"
             case .decoderOutput: name = "decoder_output_interval_ms"
             case .displaySubmit: name = "display_submit_interval_ms"
@@ -402,7 +422,7 @@ final class LiveFramePacingDiagnostics: @unchecked Sendable {
             for: .documentDirectory, in: .userDomainMask
         ).first else { return }
         let url = directory.appendingPathComponent(fileName)
-        let header = "frame_id,source_timestamp,udp_arrival_s,au_complete_s,au_buffer_input_s,au_buffer_output_s,decoder_input_s,decoder_output_s,display_submit_s,udp_interval_ms,au_interval_ms,au_buffer_input_interval_ms,au_buffer_output_interval_ms,decoder_input_interval_ms,decoder_output_interval_ms,display_interval_ms,source_interval_ms,cause\n"
+        let header = "frame_id,source_timestamp,udp_arrival_s,au_complete_s,au_buffer_input_s,au_buffer_output_s,delivery_queue_input_s,sample_build_s,renderer_enqueue_s,decoder_input_s,decoder_output_s,display_submit_s,udp_interval_ms,au_interval_ms,au_buffer_input_interval_ms,au_buffer_output_interval_ms,delivery_queue_input_interval_ms,sample_build_interval_ms,renderer_enqueue_interval_ms,decoder_input_interval_ms,decoder_output_interval_ms,display_interval_ms,source_interval_ms,cause\n"
         if !FileManager.default.fileExists(atPath: url.path) {
             try? Data(header.utf8).write(to: url)
         }

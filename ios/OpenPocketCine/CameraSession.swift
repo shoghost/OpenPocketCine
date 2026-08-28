@@ -297,6 +297,11 @@ final class CameraSession {
     @ObservationIgnored private var colorPin: (expected: ColorMode, deadline: Date)?
     @ObservationIgnored private var gimbalStickMapping = GimbalStickMapping()
     @ObservationIgnored let decoder = HevcDecoder()
+    #if OPENPOCKETCINE_DIAGNOSTICS
+        /// Test-only Nano identity delivery. Parse/build/enqueue stays off MainActor; only
+        /// post-enqueue session health bookkeeping returns to MainActor.
+        @ObservationIgnored private var nanoImmediateVideoDelivery: NanoImmediateVideoDelivery?
+    #endif
 
     /// The live-view display layer, for the SwiftUI `VideoView`.
     var videoLayer: AVSampleBufferDisplayLayer { decoder.displayLayer }
@@ -3381,6 +3386,7 @@ final class CameraSession {
     func noteSceneBecameInactive() {
         datalink?.resetNanoArrivalJitterBuffer(reason: "background")
         #if OPENPOCKETCINE_DIAGNOSTICS
+            nanoImmediateVideoDelivery?.reset(reason: "background")
             LiveFramePacingDiagnostics.shared.noteLifecycleBoundary()
         #endif
         if case .manualWifiJoin = phase {
@@ -3701,6 +3707,10 @@ final class CameraSession {
         let link = datalink
         datalink = nil
         guard let link else { return }
+        #if OPENPOCKETCINE_DIAGNOSTICS
+            link.setNanoDiagnosticDelivery(nil)
+            nanoImmediateVideoDelivery?.reset(reason: "datalink_dispose")
+        #endif
         link.onAccessUnit = nil
         link.onStatusFrame = nil
         link.close()
@@ -3722,6 +3732,22 @@ final class CameraSession {
             self?.applyIncomingStatus(frame)
         }
         if connectedCamera?.model.family == .nano {
+            #if OPENPOCKETCINE_DIAGNOSTICS
+                if nanoImmediateVideoDelivery == nil {
+                    nanoImmediateVideoDelivery = NanoImmediateVideoDelivery(
+                        renderer: decoder.displayLayer.sampleBufferRenderer
+                    ) { [weak self] event in
+                        Task { @MainActor [weak self] in
+                            self?.handleNanoImmediateDeliveryEvent(event)
+                        }
+                    }
+                }
+                if let delivery = nanoImmediateVideoDelivery {
+                    dl.setNanoDiagnosticDelivery { [weak delivery] accessUnit in
+                        delivery?.push(accessUnit)
+                    }
+                }
+            #endif
             dl.enableNanoArrivalJitterBuffer()
         }
         dl.onAccessUnit = { [weak self] accessUnit in
@@ -3889,6 +3915,22 @@ final class CameraSession {
         if decoder.decode(accessUnit: accessUnit.bytes) { rawFramesEnqueued += 1 }
         #endif
     }
+
+    #if OPENPOCKETCINE_DIAGNOSTICS
+        private func handleNanoImmediateDeliveryEvent(_ event: NanoImmediateVideoDelivery.Event) {
+            switch event {
+            case .format(let width, let height, let nalTypes, let changed):
+                decoder.noteNanoImmediateFormat(
+                    width: width, height: height, nalTypes: nalTypes, changed: changed)
+            case .enqueued(let isIDR, let nalTypes):
+                rawAccessUnits += 1
+                rawFramesEnqueued += 1
+                decoder.noteNanoImmediateEnqueue(isIDR: isIDR, nalTypes: nalTypes)
+            case .reset:
+                decoder.noteNanoImmediateReset()
+            }
+        }
+    #endif
 
     private func publishStatusNow() {
         lastStatusMutation = CFAbsoluteTimeGetCurrent()

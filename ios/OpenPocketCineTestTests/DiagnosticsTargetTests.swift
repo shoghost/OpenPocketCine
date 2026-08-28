@@ -165,4 +165,29 @@ final class DiagnosticsTargetTests: XCTestCase {
         let schedule = NanoArrivalJitterBuffer.Schedule(sourceBaseTimestamp: 1_000)
         XCTAssertEqual(schedule.offsetSeconds(for: 1_067), 0.067, accuracy: 0.000_001)
     }
+
+    func testImmediateNanoDeliveryPreservesProductionPresentationSemantics() {
+        XCTAssertTrue(NanoImmediateVideoDelivery.displayImmediately)
+        XCTAssertTrue(NanoImmediateVideoDelivery.usesProductionPresentTiming)
+        XCTAssertEqual(NanoImmediateVideoDelivery.mainActorHopsBeforeRendererEnqueue, 0)
+        let expected = LiveViewPresentTiming.sampleTiming(frameIndex: 42)
+        let actual = NanoImmediateVideoDelivery.sampleTiming(frameIndex: 42)
+        XCTAssertEqual(actual.duration, expected.duration)
+        XCTAssertEqual(actual.presentationTimeStamp, expected.presentationTimeStamp)
+        XCTAssertEqual(actual.decodeTimeStamp, expected.decodeTimeStamp)
+    }
+
+    func testImmediateNanoDeliveryWaitsForRendererWithoutFlushPolicy() {
+        XCTAssertEqual(
+            NanoImmediateVideoDelivery.backpressureAction(isReadyForMoreMediaData: false), .wait)
+        XCTAssertEqual(
+            NanoImmediateVideoDelivery.backpressureAction(isReadyForMoreMediaData: true), .enqueue)
+    }
+
+    func testImmediateNanoDeliveryPreservesEverySampleExactlyOnceInOrder() {
+        let ids: [UInt64] = [10, 11, 12, 13]
+        let delivered = NanoImmediateVideoDelivery.orderedIDs(ids)
+        XCTAssertEqual(delivered, ids)
+        XCTAssertEqual(Set(delivered).count, ids.count)
+    }
 }
