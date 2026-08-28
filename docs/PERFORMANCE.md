@@ -25,13 +25,12 @@ the same PR.
 | Battery | Sticky `ACTION_BATTERY_CHANGED` (Android); no 1 Hz poll | [`ANDROID.md`](../ANDROID.md) |
 
 The separate `OpenPocketCineTest` diagnostics target has one deliberate exception to the normal
-live-picture policy. `NanoTimedVideoRenderer` collects 12 complete compressed Nano AVC access units
-(about 400 ms; maximum 60 / 2 s), converts them to AVCC on a serial feeder queue, and enqueues several
-future-PTS samples through `AVSampleBufferDisplayLayer.sampleBufferRenderer`. Its 30 fps host-clock
-timeline keeps roughly 250–550 ms scheduled ahead; renderer backpressure waits without flushing or
-dropping a dependent P-frame. Format change, renderer failure, reconnect, or an explicit
-requires-flush signal performs a controlled reset and resumes at IDR. Production decode and
-presentation remain unchanged and keep the identity display-layer path.
+live-picture policy. `NanoArrivalJitterBuffer` delays complete Nano AVC access units by 200 ms on a
+serial monotonic clock, then releases each AU according to the camera's original source timestamp.
+It neither normalizes to 30 fps nor duplicates/drops frames; a real 66–67 ms camera timestamp gap
+remains 66–67 ms. After release, Test uses the same `onAccessUnit → HevcDecoder → display layer`
+presentation path as Production. Earlier fixed-rate, decoded-frame, and future-PTS renderer
+experiments remain disconnected from the active Test route. Production remains unbuffered.
 
 ## Threading
 

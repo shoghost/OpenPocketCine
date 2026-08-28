@@ -63,10 +63,9 @@ final class DatalinkDriver {
     /// Depacketize + video counters on the UDP queue. Main only hops complete AUs.
     nonisolated private let videoAssembler = SoftAPVideoAssembler()
     #if OPENPOCKETCINE_DIAGNOSTICS
-        /// Test-only Nano path: complete compressed AUs enter the timed renderer before any
-        /// MainActor hop. The lock only publishes/revokes the session-scoped renderer reference.
-        nonisolated private let nanoTimedRenderer = OSAllocatedUnfairLock(
-            initialState: NanoTimedVideoRenderer?.none)
+        /// Test-only Nano path: restore source-clock cadence before the normal MainActor callback.
+        nonisolated private let nanoArrivalJitterBuffer = OSAllocatedUnfairLock(
+            initialState: NanoArrivalJitterBuffer?.none)
     #endif
     /// Session/socket snapshot for the 40 Hz ACK pump (UDP queue, not MainActor).
     nonisolated private let wire = OSAllocatedUnfairLock(initialState: WireState())
@@ -151,17 +150,22 @@ final class DatalinkDriver {
     }
 
     #if OPENPOCKETCINE_DIAGNOSTICS
-        func enableDiagnosticNanoTimedRendering(_ renderer: NanoTimedVideoRenderer) {
-            let old = nanoTimedRenderer.withLock { current -> NanoTimedVideoRenderer? in
+        func enableDiagnosticNanoArrivalJitterBuffer() {
+            let buffer = NanoArrivalJitterBuffer { [weak self] accessUnit in
+                Task(priority: .userInitiated) { @MainActor [weak self] in
+                    self?.onAccessUnit?(accessUnit)
+                }
+            }
+            let old = nanoArrivalJitterBuffer.withLock { current -> NanoArrivalJitterBuffer? in
                 let previous = current
-                current = renderer
+                current = buffer
                 return previous
             }
             old?.stop()
         }
 
-        func resetDiagnosticNanoTimedRendering(reason: String) {
-            nanoTimedRenderer.withLock { $0 }?.reset(reason: reason)
+        func resetDiagnosticNanoArrivalJitterBuffer(reason: String) {
+            nanoArrivalJitterBuffer.withLock { $0 }?.reset(reason: reason)
         }
     #endif
 
@@ -367,12 +371,12 @@ final class DatalinkDriver {
     func close() {
         closed = true
         #if OPENPOCKETCINE_DIAGNOSTICS
-            let renderer = nanoTimedRenderer.withLock { current -> NanoTimedVideoRenderer? in
+            let buffer = nanoArrivalJitterBuffer.withLock { current -> NanoArrivalJitterBuffer? in
                 let value = current
                 current = nil
                 return value
             }
-            renderer?.stop()
+            buffer?.stop()
         #endif
         onAccessUnit = nil
         onStatusFrame = nil
@@ -735,7 +739,7 @@ final class DatalinkDriver {
         // it from the UDP callback hopped to main and froze the feed when the UI was busy.
         let assembler = videoAssembler
         #if OPENPOCKETCINE_DIAGNOSTICS
-            let timedRenderer = nanoTimedRenderer
+            let arrivalJitterBuffer = nanoArrivalJitterBuffer
         #endif
         let handshake = handshakeFlag
         let inbound = handshakeInbound
@@ -807,10 +811,10 @@ final class DatalinkDriver {
                     return
                 }
                 #if OPENPOCKETCINE_DIAGNOSTICS
-                    let renderer = timedRenderer.withLock { $0 }
-                    let assembled = assembler.ingest(bytes, queuePending: renderer == nil)
-                    if let renderer, let accessUnit = assembled.accessUnit {
-                        renderer.push(accessUnit)
+                    let buffer = arrivalJitterBuffer.withLock { $0 }
+                    let assembled = assembler.ingest(bytes, queuePending: buffer == nil)
+                    if let buffer, let accessUnit = assembled.accessUnit {
+                        buffer.push(accessUnit)
                     }
                 #else
                     let assembled = assembler.ingest(bytes)

@@ -136,4 +136,33 @@ final class DiagnosticsTargetTests: XCTestCase {
         XCTAssertEqual(NanoTimedVideoRenderer.framesPerSecond, 30)
         XCTAssertEqual(NanoTimedVideoRenderer.initialLeadSeconds, 0.400, accuracy: 0.000_001)
     }
+
+    func testArrivalJitterBufferRestoresSourceTimestampCadence() {
+        let arrivalIntervals = [70, 90, 20, 50]
+        let outputIntervals = NanoArrivalJitterBuffer.Schedule.outputIntervalsMilliseconds(
+            for: [0, 33, 67, 100, 133])
+        XCTAssertEqual(outputIntervals, [33, 34, 33, 33])
+        XCTAssertNotEqual(outputIntervals, arrivalIntervals)
+    }
+
+    func testArrivalJitterBufferPreservesRealSourceGap() {
+        XCTAssertEqual(
+            NanoArrivalJitterBuffer.Schedule.outputIntervalsMilliseconds(for: [0, 33, 100]),
+            [33, 67])
+    }
+
+    func testArrivalJitterBufferPreservesEveryAUExactlyOnceAndInSourceOrder() {
+        let timestamps: [UInt32] = [100, 0, 133, 67, 33]
+        let order = NanoArrivalJitterBuffer.Schedule.orderedIndices(for: timestamps)
+        XCTAssertEqual(order, [1, 4, 3, 0, 2])
+        XCTAssertEqual(Set(order).count, timestamps.count)
+        XCTAssertEqual(order.count, timestamps.count)
+    }
+
+    func testArrivalJitterBufferUsesDelayWithoutFixedThirtyHertzConsumption() {
+        XCTAssertEqual(NanoArrivalJitterBuffer.delaySeconds, 0.200, accuracy: 0.000_001)
+        XCTAssertFalse(NanoArrivalJitterBuffer.usesFixedRatePacer)
+        let schedule = NanoArrivalJitterBuffer.Schedule(sourceBaseTimestamp: 1_000)
+        XCTAssertEqual(schedule.offsetSeconds(for: 1_067), 0.067, accuracy: 0.000_001)
+    }
 }
