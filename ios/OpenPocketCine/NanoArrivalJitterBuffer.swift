@@ -1,12 +1,16 @@
 import Foundation
 
-/// Source-clock arrival-jitter buffer for complete Nano AVC access units.
+/// Decode-before-playout queue for complete Nano AVC access units.
 ///
-/// The buffer restores the camera's own millisecond timestamp cadence after Wi-Fi arrival jitter.
-/// It does not synthesize frames, normalize to 30 fps, or change the existing decoder/presentation
-/// path. Each input AU is released exactly once to DatalinkDriver's production-shaped callback.
+/// This follows DJIWidget's `DJIVideoPreviewSmoothHelper`: arrival cadence determines the nominal
+/// frame interval and feedback keeps the oldest queued AU near the target delay. Camera source
+/// timestamps remain diagnostic metadata only; a missing AU therefore does not create a matching
+/// hole in the playout clock. Every received AU is released once, in arrival order.
 final class NanoArrivalJitterBuffer: @unchecked Sendable {
-    static let delaySeconds = 0.200
+    static let targetQueueDelaySeconds = 0.200
+    static let estimationWindowSeconds = 2.0
+    static let feedbackDeadbandSeconds = 0.010
+    static let feedbackStepSeconds = 0.005
     static let usesFixedRatePacer = false
 
     static func djiRecordTimestamp(_ bytes: [UInt8]) -> UInt32? {
@@ -19,37 +23,62 @@ final class NanoArrivalJitterBuffer: @unchecked Sendable {
 
     typealias Output = @Sendable (LivePacedAccessUnit) -> Void
 
-    struct Schedule: Equatable, Sendable {
-        let sourceBaseTimestamp: UInt32
-
-        func offsetSeconds(for timestamp: UInt32) -> TimeInterval {
-            TimeInterval(Self.deltaMilliseconds(from: sourceBaseTimestamp, to: timestamp)) / 1_000
+    /// Pure policy helpers shared by the runtime queue and deterministic tests.
+    struct Policy {
+        /// Estimate encoded-frame cadence over the rolling arrival window. Trimming the tails once
+        /// enough samples exist prevents a scheduling spike from selecting the playout rate without
+        /// assuming 25 or 30 fps.
+        static func nominalInterval(arrivalTimes: [TimeInterval]) -> TimeInterval? {
+            guard arrivalTimes.count >= 2 else { return nil }
+            let intervals = zip(arrivalTimes, arrivalTimes.dropFirst()).compactMap { pair in
+                let value = pair.1 - pair.0
+                return value >= 0.005 && value <= 0.250 && value.isFinite ? value : nil
+            }.sorted()
+            guard !intervals.isEmpty else { return nil }
+            let trim = intervals.count >= 10 ? max(1, intervals.count / 10) : 0
+            let kept = Array(intervals.dropFirst(trim).dropLast(trim))
+            let values = kept.isEmpty ? intervals : kept
+            return values.reduce(0, +) / Double(values.count)
         }
 
-        static func outputIntervalsMilliseconds(for timestamps: [UInt32]) -> [Int64] {
-            zip(timestamps, timestamps.dropFirst()).map {
-                deltaMilliseconds(from: $0.0, to: $0.1)
+        static func releaseInterval(
+            nominal: TimeInterval,
+            queueDelay: TimeInterval,
+            processingCost: TimeInterval = 0
+        ) -> TimeInterval {
+            var adjusted = nominal
+            if queueDelay
+                > NanoArrivalJitterBuffer.targetQueueDelaySeconds
+                    + NanoArrivalJitterBuffer.feedbackDeadbandSeconds
+            {
+                adjusted -= NanoArrivalJitterBuffer.feedbackStepSeconds
+            } else if queueDelay
+                < NanoArrivalJitterBuffer.targetQueueDelaySeconds
+                    - NanoArrivalJitterBuffer.feedbackDeadbandSeconds
+            {
+                adjusted += NanoArrivalJitterBuffer.feedbackStepSeconds
             }
+            return max(0, adjusted - max(0, processingCost))
         }
 
-        static func orderedIndices(for timestamps: [UInt32]) -> [Int] {
-            guard let first = timestamps.first else { return [] }
-            return timestamps.enumerated().sorted {
-                let left = deltaMilliseconds(from: first, to: $0.element)
-                let right = deltaMilliseconds(from: first, to: $1.element)
-                return left == right ? $0.offset < $1.offset : left < right
-            }.map(\.offset)
+        static func hasRefilled(queueDelay: TimeInterval) -> Bool {
+            queueDelay + 0.000_5 >= NanoArrivalJitterBuffer.targetQueueDelaySeconds
         }
 
-        private static func deltaMilliseconds(from: UInt32, to: UInt32) -> Int64 {
-            Int64(Int32(bitPattern: to &- from))
+        /// Test model for playout cadence. Missing arrivals influence the rolling estimate but are
+        /// never copied verbatim into output intervals as source-timestamp holes.
+        static func simulatedReleaseIntervals(arrivalTimes: [TimeInterval]) -> [TimeInterval] {
+            guard arrivalTimes.count >= 2, let nominal = nominalInterval(arrivalTimes: arrivalTimes)
+            else { return [] }
+            return Array(repeating: nominal, count: arrivalTimes.count - 1)
         }
+
+        static func preservesOrder<T>(_ values: [T]) -> [T] { values }
     }
 
     private struct Entry: Sendable {
         let accessUnit: LivePacedAccessUnit
-        let sourceOrder: Int64
-        let arrivalOrder: UInt64
+        let arrival: TimeInterval
     }
 
     private let queue = DispatchQueue(label: "opv.nano.arrival-jitter", qos: .userInteractive)
@@ -58,15 +87,12 @@ final class NanoArrivalJitterBuffer: @unchecked Sendable {
 
     // queue-owned state.
     private var pending: [Entry] = []
-    private var sourceAnchorRaw: UInt32?
-    private var sourceAnchorUnwrapped: Int64?
-    private var sourceBaseOrder: Int64?
-    private var hostBaseTime: TimeInterval?
-    private var nextArrivalOrder: UInt64 = 0
+    private var arrivalSamples: [TimeInterval] = []
+    private var nominalInterval: TimeInterval?
+    private var playoutActive = false
     private var lastInputAt: TimeInterval?
-    private var lastInputSourceOrder: Int64?
+    private var lastInputSourceTimestamp: UInt32?
     private var lastOutputAt: TimeInterval?
-    private var lastOutputSourceOrder: Int64?
     private var stopped = false
     private var underflowCount = 0
     private var rebufferCount = 0
@@ -74,20 +100,16 @@ final class NanoArrivalJitterBuffer: @unchecked Sendable {
     private var inputIntervals: [TimeInterval] = []
     private var outputIntervals: [TimeInterval] = []
     private var sourceIntervals: [TimeInterval] = []
+    private var queueDelays: [TimeInterval] = []
 
     init(output: @escaping Output) {
         self.output = output
         timer = DispatchSource.makeTimerSource(queue: queue)
         timer.setEventHandler { [weak self] in self?.releaseNext() }
-        timer.schedule(deadline: .now() + .seconds(86_400))
+        parkTimer()
         timer.resume()
-        #if OPENPOCKETCINE_DIAGNOSTICS
-            ControlLiveLog.line(
-                "nano_test_mode=arrival_jitter_buffer_only jitter_buffer_delay_ms=200 fixed_fps_pacer=false timed_renderer=false production_presentation=true")
-        #else
-            ControlLiveLog.line(
-                "nano_arrival_jitter_buffer=true jitter_buffer_delay_ms=200 fixed_fps_pacer=false production_presentation=true")
-        #endif
+        ControlLiveLog.line(
+            "nano_smooth_decode=true target_queue_delay_ms=200 arrival_window_ms=2000 deadband_ms=10 feedback_step_ms=5 fixed_fps_pacer=false source_timestamp_scheduler=false")
     }
 
     /// Called directly with each complete AU on the datalink receive path.
@@ -104,7 +126,7 @@ final class NanoArrivalJitterBuffer: @unchecked Sendable {
         queue.async { [weak self] in
             guard let self else { return }
             logSummary(reason: reason)
-            clearTimeline()
+            clearQueue()
         }
     }
 
@@ -125,114 +147,92 @@ final class NanoArrivalJitterBuffer: @unchecked Sendable {
             appendBounded(arrival - previous, to: &inputIntervals)
         }
         lastInputAt = arrival
-        nextArrivalOrder &+= 1
-        let sourceOrder = unwrap(accessUnit.trace.sourceTimestamp)
-
-        if let previous = lastInputSourceOrder, sourceOrder > previous {
-            appendBounded(TimeInterval(sourceOrder - previous) / 1_000, to: &sourceIntervals)
-        }
-        lastInputSourceOrder = sourceOrder
-
-        if sourceBaseOrder == nil || hostBaseTime == nil {
-            anchor(sourceOrder: sourceOrder, now: arrival)
-        } else if pending.isEmpty, lastOutputAt != nil,
-            releaseTime(for: sourceOrder) <= arrival
-        {
-            // The scheduled reserve is truly exhausted. Keep Production's last displayed frame,
-            // collect a new 200 ms reserve, and restart from this AU without decoder intervention.
-            underflowCount += 1
-            rebufferCount += 1
-            anchor(sourceOrder: sourceOrder, now: arrival)
+        if let timestamp = accessUnit.trace.sourceTimestamp {
+            if let previous = lastInputSourceTimestamp {
+                let delta = Int64(Int32(bitPattern: timestamp &- previous))
+                if delta > 0 { appendBounded(TimeInterval(delta) / 1_000, to: &sourceIntervals) }
+            }
+            lastInputSourceTimestamp = timestamp
         }
 
-        pending.append(
-            Entry(
-                accessUnit: accessUnit, sourceOrder: sourceOrder,
-                arrivalOrder: nextArrivalOrder))
-        pending.sort {
-            $0.sourceOrder == $1.sourceOrder
-                ? $0.arrivalOrder < $1.arrivalOrder : $0.sourceOrder < $1.sourceOrder
+        pending.append(Entry(accessUnit: accessUnit, arrival: arrival))
+        arrivalSamples.append(arrival)
+        let cutoff = arrival - Self.estimationWindowSeconds
+        arrivalSamples.removeAll { $0 < cutoff }
+        if let estimate = Policy.nominalInterval(arrivalTimes: arrivalSamples) {
+            nominalInterval = estimate
         }
-        scheduleNext(now: arrival)
+
+        if !playoutActive, let first = pending.first {
+            timer.schedule(
+                deadline: .now() + max(0, Self.targetQueueDelaySeconds - (arrival - first.arrival)),
+                leeway: .milliseconds(1))
+        }
         logSummaryIfNeeded(now: arrival)
     }
 
     private func releaseNext() {
         dispatchPrecondition(condition: .onQueue(queue))
-        guard !stopped, let first = pending.first else { return }
-        let now = ProcessInfo.processInfo.systemUptime
-        let due = releaseTime(for: first.sourceOrder)
-        guard due <= now + 0.000_5 else {
-            scheduleNext(now: now)
+        guard !stopped, let first = pending.first else {
+            parkTimer()
             return
         }
-        pending.removeFirst()
-        if let previous = lastOutputAt, now > previous {
-            appendBounded(now - previous, to: &outputIntervals)
+        let startedAt = ProcessInfo.processInfo.systemUptime
+        let queueDelay = max(0, startedAt - first.arrival)
+        if !playoutActive, !Policy.hasRefilled(queueDelay: queueDelay) {
+            timer.schedule(
+                deadline: .now() + max(0, Self.targetQueueDelaySeconds - queueDelay),
+                leeway: .milliseconds(1))
+            return
         }
-        lastOutputAt = now
-        lastOutputSourceOrder = first.sourceOrder
+        playoutActive = true
+        pending.removeFirst()
+        appendBounded(queueDelay, to: &queueDelays)
+        if let previous = lastOutputAt, startedAt > previous {
+            appendBounded(startedAt - previous, to: &outputIntervals)
+        }
+        lastOutputAt = startedAt
         #if OPENPOCKETCINE_DIAGNOSTICS
             LiveFramePacingDiagnostics.shared.noteAccessUnitBufferOutput(
-                first.accessUnit.trace, at: now)
+                first.accessUnit.trace, at: startedAt)
         #endif
-        output(first.accessUnit)
-        scheduleNext(now: now)
-        logSummaryIfNeeded(now: now)
-    }
 
-    private func scheduleNext(now: TimeInterval) {
-        guard !stopped, let first = pending.first else {
-            timer.schedule(deadline: .now() + .seconds(86_400))
+        output(first.accessUnit)
+        let finishedAt = ProcessInfo.processInfo.systemUptime
+        let processingCost = max(0, finishedAt - startedAt)
+
+        guard !pending.isEmpty else {
+            playoutActive = false
+            underflowCount += 1
+            rebufferCount += 1
+            parkTimer()
+            logSummaryIfNeeded(now: finishedAt)
             return
         }
-        let delay = max(0, releaseTime(for: first.sourceOrder) - now)
-        timer.schedule(
-            deadline: .now() + delay,
-            leeway: .milliseconds(1))
+        guard let nominalInterval else {
+            playoutActive = false
+            parkTimer()
+            return
+        }
+        let sleep = Policy.releaseInterval(
+            nominal: nominalInterval, queueDelay: queueDelay, processingCost: processingCost)
+        timer.schedule(deadline: .now() + sleep, leeway: .milliseconds(1))
+        logSummaryIfNeeded(now: finishedAt)
     }
 
-    private func anchor(sourceOrder: Int64, now: TimeInterval) {
-        sourceBaseOrder = sourceOrder
-        hostBaseTime = now + Self.delaySeconds
-    }
-
-    private func releaseTime(for sourceOrder: Int64) -> TimeInterval {
-        guard let sourceBaseOrder, let hostBaseTime else {
-            return ProcessInfo.processInfo.systemUptime + Self.delaySeconds
-        }
-        return hostBaseTime + TimeInterval(sourceOrder - sourceBaseOrder) / 1_000
-    }
-
-    private func unwrap(_ timestamp: UInt32?) -> Int64 {
-        guard let timestamp else {
-            return (pending.last?.sourceOrder ?? lastOutputSourceOrder ?? 0) + 33
-        }
-        guard let anchorRaw = sourceAnchorRaw, let anchor = sourceAnchorUnwrapped else {
-            sourceAnchorRaw = timestamp
-            sourceAnchorUnwrapped = Int64(timestamp)
-            return Int64(timestamp)
-        }
-        let delta = Int64(Int32(bitPattern: timestamp &- anchorRaw))
-        let value = anchor + delta
-        if delta > 0 {
-            sourceAnchorRaw = timestamp
-            sourceAnchorUnwrapped = value
-        }
-        return value
-    }
-
-    private func clearTimeline() {
-        pending.removeAll(keepingCapacity: true)
-        sourceAnchorRaw = nil
-        sourceAnchorUnwrapped = nil
-        sourceBaseOrder = nil
-        hostBaseTime = nil
-        lastInputAt = nil
-        lastInputSourceOrder = nil
-        lastOutputAt = nil
-        lastOutputSourceOrder = nil
+    private func parkTimer() {
         timer.schedule(deadline: .now() + .seconds(86_400))
+    }
+
+    private func clearQueue() {
+        pending.removeAll(keepingCapacity: true)
+        arrivalSamples.removeAll(keepingCapacity: true)
+        nominalInterval = nil
+        playoutActive = false
+        lastInputAt = nil
+        lastInputSourceTimestamp = nil
+        lastOutputAt = nil
+        parkTimer()
     }
 
     private func logSummaryIfNeeded(now: TimeInterval) {
@@ -242,17 +242,12 @@ final class NanoArrivalJitterBuffer: @unchecked Sendable {
     }
 
     private func logSummary(reason: String) {
-        let span: Double
-        if let first = pending.first, let last = pending.last {
-            span = Double(max(0, last.sourceOrder - first.sourceOrder))
-        } else {
-            span = 0
-        }
         ControlLiveLog.line(
-            "arrival-jitter-buffer: reason=\(reason) arrival_jitter_input_interval_ms{\(Self.stats(inputIntervals))} jitter_buffer_output_interval_ms{\(Self.stats(outputIntervals))} buffer_depth=\(pending.count) buffer_span_ms=\(String(format: "%.1f", span)) underflow_count=\(underflowCount) rebuffer_count=\(rebufferCount) source_timestamp_interval_ms{\(Self.stats(sourceIntervals))}")
+            "nano-smooth-decode: reason=\(reason) arrival_interval_ms{\(Self.stats(inputIntervals))} release_interval_ms{\(Self.stats(outputIntervals))} queue_delay_ms{\(Self.stats(queueDelays))} buffer_depth=\(pending.count) nominal_interval_ms=\(String(format: "%.2f", (nominalInterval ?? 0) * 1_000)) underflow_count=\(underflowCount) rebuffer_count=\(rebufferCount) source_timestamp_interval_ms{\(Self.stats(sourceIntervals))}")
         inputIntervals.removeAll(keepingCapacity: true)
         outputIntervals.removeAll(keepingCapacity: true)
         sourceIntervals.removeAll(keepingCapacity: true)
+        queueDelays.removeAll(keepingCapacity: true)
     }
 
     private func appendBounded(_ value: TimeInterval, to values: inout [TimeInterval]) {

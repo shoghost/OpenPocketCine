@@ -75,11 +75,11 @@ final class DatalinkDriver {
 
     /// Depacketize + video counters on the UDP queue. Main only hops complete AUs.
     nonisolated private let videoAssembler = SoftAPVideoAssembler()
-    /// Nano path: restore source-clock cadence before the normal MainActor callback.
+    /// Nano path: smooth encoded-AU arrival cadence before the normal MainActor callback.
     nonisolated private let nanoArrivalJitterBuffer = OSAllocatedUnfairLock(
         initialState: NanoArrivalJitterBuffer?.none)
     #if OPENPOCKETCINE_DIAGNOSTICS
-        /// Test-only direct handoff after the source-clock buffer. The lock is read on the buffer's
+        /// Test-only direct handoff after the encoded-AU queue. The lock is read on the buffer's
         /// queue, so renderer delivery does not wait for MainActor.
         nonisolated private let nanoDiagnosticDelivery = DatalinkNanoDiagnosticDeliveryBox()
     #endif
