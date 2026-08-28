@@ -279,6 +279,7 @@ final class LiveFramePacingDiagnostics: @unchecked Sendable {
     private func note(_ stage: FramePacingStage, trace: LiveFrameTrace, at now: TimeInterval) {
         var rows: [String] = []
         var summary: String?
+        var summaryBegin: TimeInterval?
         lock.withLock { state in
             var frame = state.frames[trace.id] ?? FrameTimes(sourceTimestamp: trace.sourceTimestamp)
             frame.sourceTimestamp = trace.sourceTimestamp
@@ -341,6 +342,7 @@ final class LiveFramePacingDiagnostics: @unchecked Sendable {
             }
             if now - state.lastSummaryAt >= 5 {
                 state.lastSummaryAt = now
+                summaryBegin = NanoStageDurationProbe.now()
                 summary = Self.summaryLine(state)
                 if !state.csvRows.isEmpty {
                     rows.append(contentsOf: state.csvRows)
@@ -352,6 +354,10 @@ final class LiveFramePacingDiagnostics: @unchecked Sendable {
         if let summary {
             log.info("\(summary, privacy: .public)")
             ControlLiveLog.line(summary)
+        }
+        if let summaryBegin {
+            NanoStageDurationProbe.logIfStalled(
+                stage: "diagnostics_summary", begin: summaryBegin)
         }
     }
 

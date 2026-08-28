@@ -190,4 +190,11 @@ final class DiagnosticsTargetTests: XCTestCase {
         XCTAssertEqual(delivered, ids)
         XCTAssertEqual(Set(delivered).count, ids.count)
     }
+
+    func testNanoStageDurationProbeUsesIndependentFiftyMillisecondThreshold() {
+        XCTAssertEqual(NanoStageDurationProbe.thresholdMilliseconds, 50)
+        XCTAssertEqual(
+            NanoStageDurationProbe.durationMilliseconds(from: 10.0, to: 10.075), 75,
+            accuracy: 0.000_001)
+    }
 }

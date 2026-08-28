@@ -4,6 +4,35 @@ import CoreMedia
 import Foundation
 import OpenPocketViewCore
 
+/// Stateless Test-only wall-time probe. It deliberately does not use
+/// `LiveFramePacingDiagnostics` or its shared lock.
+enum NanoStageDurationProbe {
+    static let thresholdMilliseconds = 50.0
+
+    static func now() -> TimeInterval {
+        ProcessInfo.processInfo.systemUptime
+    }
+
+    static func durationMilliseconds(from begin: TimeInterval, to end: TimeInterval) -> Double {
+        max(0, end - begin) * 1_000
+    }
+
+    static func logIfStalled(
+        stage: String, begin: TimeInterval, end: TimeInterval = now()
+    ) {
+        let duration = durationMilliseconds(from: begin, to: end)
+        guard duration >= thresholdMilliseconds else { return }
+        ControlLiveLog.line(
+            "nano-stage-stall: stage=\(stage) duration_ms=\(String(format: "%.1f", duration))")
+    }
+
+    static func measure<T>(stage: String, _ body: () throws -> T) rethrows -> T {
+        let begin = now()
+        defer { logIfStalled(stage: stage, begin: begin) }
+        return try body()
+    }
+}
+
 /// Test-only immediate Nano presentation path.
 ///
 /// Complete AUs have already passed through `NanoArrivalJitterBuffer`. This class performs the
@@ -68,9 +97,21 @@ final class NanoImmediateVideoDelivery: @unchecked Sendable {
 
     /// Thread-safe entry called directly by the 200 ms source-clock buffer output.
     func push(_ accessUnit: LivePacedAccessUnit) {
-        let now = ProcessInfo.processInfo.systemUptime
-        LiveFramePacingDiagnostics.shared.noteDeliveryQueueInput(accessUnit.trace, at: now)
-        deliveryQueue.async { [weak self] in self?.accept(accessUnit) }
+        let submittedAt = NanoStageDurationProbe.now()
+        NanoStageDurationProbe.measure(stage: "diagnostics_note_delivery_queue_input") {
+            LiveFramePacingDiagnostics.shared.noteDeliveryQueueInput(
+                accessUnit.trace, at: submittedAt)
+        }
+        deliveryQueue.async { [weak self] in
+            let startedAt = NanoStageDurationProbe.now()
+            NanoStageDurationProbe.logIfStalled(
+                stage: "delivery_queue_wait", begin: submittedAt, end: startedAt)
+            defer {
+                NanoStageDurationProbe.logIfStalled(
+                    stage: "delivery_queue_closure", begin: startedAt)
+            }
+            self?.accept(accessUnit)
+        }
     }
 
     func reset(reason: String) {
@@ -113,21 +154,25 @@ final class NanoImmediateVideoDelivery: @unchecked Sendable {
         dispatchPrecondition(condition: .onQueue(deliveryQueue))
         guard !stopped else { return }
 
-        let nals = Hevc.nalUnits(accessUnit.bytes).filter { !$0.isEmpty }
         var slices: [[UInt8]] = []
         var nalTypes = Set<Int>()
-        for nal in nals {
-            let type = Avc.nalType(nal[0])
-            nalTypes.insert(type)
-            switch type {
-            case Avc.sps: sps = nal
-            case Avc.pps: pps = nal
-            case let value where Avc.isVCL(value): slices.append(nal)
-            default: break
+        NanoStageDurationProbe.measure(stage: "nal_parse") {
+            let nals = Hevc.nalUnits(accessUnit.bytes).filter { !$0.isEmpty }
+            for nal in nals {
+                let type = Avc.nalType(nal[0])
+                nalTypes.insert(type)
+                switch type {
+                case Avc.sps: sps = nal
+                case Avc.pps: pps = nal
+                case let value where Avc.isVCL(value): slices.append(nal)
+                default: break
+                }
             }
         }
 
-        let formatChanged = updateFormatIfReady(nalTypes: nalTypes)
+        let formatChanged = NanoStageDurationProbe.measure(stage: "format_update") {
+            updateFormatIfReady(nalTypes: nalTypes)
+        }
         if formatChanged {
             // Production's identity path flushes only for a real format change/failure. Never flush
             // merely because the renderer temporarily reports backpressure.
@@ -145,12 +190,17 @@ final class NanoImmediateVideoDelivery: @unchecked Sendable {
         }
 
         frameIndex += 1
-        let buildAt = ProcessInfo.processInfo.systemUptime
-        guard let sample = makeSampleBuffer(
-            slices: slices, format: format,
-            timing: Self.sampleTiming(frameIndex: frameIndex))
+        let buildAt = NanoStageDurationProbe.now()
+        let builtSample = NanoStageDurationProbe.measure(stage: "make_sample_buffer") {
+            makeSampleBuffer(
+                slices: slices, format: format,
+                timing: Self.sampleTiming(frameIndex: frameIndex))
+        }
+        guard let sample = builtSample
         else { return }
-        LiveFramePacingDiagnostics.shared.noteSampleBuild(accessUnit.trace, at: buildAt)
+        NanoStageDurationProbe.measure(stage: "diagnostics_note_sample_build") {
+            LiveFramePacingDiagnostics.shared.noteSampleBuild(accessUnit.trace, at: buildAt)
+        }
 
         pending.append(
             PendingSample(
@@ -186,10 +236,17 @@ final class NanoImmediateVideoDelivery: @unchecked Sendable {
         }
 
         let entry = pending.removeFirst()
-        renderer.enqueue(entry.sample)
-        let enqueuedAt = ProcessInfo.processInfo.systemUptime
-        LiveFramePacingDiagnostics.shared.noteRendererEnqueue(entry.accessUnit.trace, at: enqueuedAt)
-        LiveFramePacingDiagnostics.shared.noteDisplaySubmit(entry.accessUnit.trace)
+        NanoStageDurationProbe.measure(stage: "renderer_enqueue") {
+            renderer.enqueue(entry.sample)
+        }
+        let enqueuedAt = NanoStageDurationProbe.now()
+        NanoStageDurationProbe.measure(stage: "diagnostics_note_renderer_enqueue") {
+            LiveFramePacingDiagnostics.shared.noteRendererEnqueue(
+                entry.accessUnit.trace, at: enqueuedAt)
+        }
+        NanoStageDurationProbe.measure(stage: "diagnostics_note_display_submit") {
+            LiveFramePacingDiagnostics.shared.noteDisplaySubmit(entry.accessUnit.trace)
+        }
         eventHandler(.enqueued(isIDR: entry.isIDR, nalTypes: entry.nalTypes))
 
         // Normal operation has no pending backlog because the source-clock buffer emits one AU at
