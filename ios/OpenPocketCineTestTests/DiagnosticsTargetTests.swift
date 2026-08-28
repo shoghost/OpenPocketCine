@@ -138,7 +138,7 @@ final class DiagnosticsTargetTests: XCTestCase {
     }
 
     func testArrivalJitterBufferRestoresSourceTimestampCadence() {
-        let arrivalIntervals = [70, 90, 20, 50]
+        let arrivalIntervals: [Int64] = [70, 90, 20, 50]
         let outputIntervals = NanoArrivalJitterBuffer.Schedule.outputIntervalsMilliseconds(
             for: [0, 33, 67, 100, 133])
         XCTAssertEqual(outputIntervals, [33, 34, 33, 33])
