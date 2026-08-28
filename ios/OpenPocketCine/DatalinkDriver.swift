@@ -1233,6 +1233,7 @@ private final class SoftAPVideoAssembler: @unchecked Sendable {
         #if OPENPOCKETCINE_DIAGNOSTICS
         var seenPositions: Set<Int> = []
         var maxPosition: Int?
+        var incompleteAUDiagnostics = NanoIncompleteAUDiagnostics()
         #endif
         var hopScheduled = false
     }
@@ -1250,6 +1251,40 @@ private final class SoftAPVideoAssembler: @unchecked Sendable {
             if first { state.loggedFirst = true }
             let now = ProcessInfo.processInfo.systemUptime
             let frameNumber = datagram[16]
+            #if OPENPOCKETCINE_DIAGNOSTICS
+            let groupWord = UInt16(datagram[16]) | (UInt16(datagram[17]) << 8)
+            let wireWord = UInt16(datagram[18]) | (UInt16(datagram[19]) << 8)
+            let wirePosition = Int(wireWord) * 2 + Int(datagram[17] >> 7)
+            let diagnosticSequence = DumlTransport.transportSeq(datagram) ?? 0
+            let diagnosticSourceTimestamp: UInt32?
+            if datagram.count >= 36, datagram[20] == 0, datagram[21] == 0,
+                datagram[22] == 1, datagram[23] == 0xff
+            {
+                diagnosticSourceTimestamp =
+                    UInt32(datagram[32]) | (UInt32(datagram[33]) << 8)
+                    | (UInt32(datagram[34]) << 16) | (UInt32(datagram[35]) << 24)
+            } else {
+                diagnosticSourceTimestamp = nil
+            }
+            let diagnosticObservation = state.incompleteAUDiagnostics.observe(
+                NanoIncompleteAUDiagnostics.Packet(
+                    groupID: groupWord & 0x7fff, frameNumber: frameNumber,
+                    wireIndex: wirePosition,
+                    datalinkSequence: diagnosticSequence,
+                    sourceTimestamp: diagnosticSourceTimestamp, arrivalTime: now))
+            if !diagnosticObservation.newSequenceGaps.isEmpty {
+                let gaps = diagnosticObservation.newSequenceGaps.map(String.init)
+                    .joined(separator: ",")
+                ControlLiveLog.line(
+                    "nano-datalink-gap: group_id=\(groupWord & 0x7fff) wire_index=\(wirePosition) datalink_seq=\(diagnosticSequence) missing_blocks=[\(gaps)]")
+            }
+            if diagnosticObservation.duplicate || diagnosticObservation.reordered
+                || diagnosticObservation.lateFragment
+            {
+                ControlLiveLog.line(
+                    "nano-fragment-event: group_id=\(groupWord & 0x7fff) wire_index=\(wirePosition) datalink_seq=\(diagnosticSequence) duplicate=\(diagnosticObservation.duplicate) reordered=\(diagnosticObservation.reordered) late=\(diagnosticObservation.lateFragment)")
+            }
+            #endif
             let previousFrameID = state.frameID
             let previousArrival = state.frameArrival
             let previousRecord = state.recordBytes
@@ -1283,6 +1318,12 @@ private final class SoftAPVideoAssembler: @unchecked Sendable {
             #if OPENPOCKETCINE_DIAGNOSTICS
             if state.depacketizer.droppedIncomplete > droppedBefore {
                 LiveFramePacingDiagnostics.shared.noteIncompleteFrame(id: previousFrameID)
+                if let event = diagnosticObservation.closedGroup {
+                    ControlLiveLog.line(event.logLine)
+                } else {
+                    ControlLiveLog.line(
+                        "nano-incomplete-au: reason=unknown diagnostics_state_unavailable=true")
+                }
             }
             #endif
             let au = bytes.map {
@@ -1352,7 +1393,18 @@ private final class SoftAPVideoAssembler: @unchecked Sendable {
     }
 
     func reset() {
+        #if OPENPOCKETCINE_DIAGNOSTICS
+        lock.withLock { state in
+            if let event = state.incompleteAUDiagnostics.discardCurrent(
+                reason: .reset, at: ProcessInfo.processInfo.systemUptime)
+            {
+                ControlLiveLog.line(event.logLine)
+            }
+            state = State()
+        }
+        #else
         lock.withLock { $0 = State() }
+        #endif
     }
 
     /// Clear receive clocks. Stamping `Date()` looked like a live packet and

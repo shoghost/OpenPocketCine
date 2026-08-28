@@ -197,4 +197,74 @@ final class DiagnosticsTargetTests: XCTestCase {
             NanoStageDurationProbe.durationMilliseconds(from: 10.0, to: 10.075), 75,
             accuracy: 0.000_001)
     }
+
+    func testIncompleteAUDiagnosticsFindsOneMissingFragment() {
+        var diagnostics = NanoIncompleteAUDiagnostics()
+        _ = diagnostics.observe(incompletePacket(group: 1, wire: 40, sequence: 1_000))
+        _ = diagnostics.observe(incompletePacket(group: 1, wire: 42, sequence: 1_008))
+        let boundary = diagnostics.observe(incompletePacket(group: 2, wire: 80, sequence: 1_016))
+        XCTAssertEqual(boundary.closedGroup?.missingLocalIndices, [1])
+        XCTAssertEqual(boundary.closedGroup?.receivedLocalIndices, [0, 2])
+    }
+
+    func testIncompleteAUDiagnosticsSeparatesCompleteOutOfOrderGroup() {
+        var diagnostics = NanoIncompleteAUDiagnostics()
+        _ = diagnostics.observe(incompletePacket(group: 1, wire: 40, sequence: 1_000))
+        _ = diagnostics.observe(incompletePacket(group: 1, wire: 42, sequence: 1_008))
+        let late = diagnostics.observe(incompletePacket(group: 1, wire: 41, sequence: 1_016))
+        let boundary = diagnostics.observe(incompletePacket(group: 2, wire: 80, sequence: 1_024))
+        XCTAssertTrue(late.reordered)
+        XCTAssertTrue(late.lateFragment)
+        XCTAssertEqual(boundary.closedGroup?.missingLocalIndices, [])
+        XCTAssertEqual(boundary.closedGroup?.correlation, .reorderOrLate)
+    }
+
+    func testIncompleteAUDiagnosticsIdentifiesDuplicateFragment() {
+        var diagnostics = NanoIncompleteAUDiagnostics()
+        _ = diagnostics.observe(incompletePacket(group: 1, wire: 40, sequence: 1_000))
+        _ = diagnostics.observe(incompletePacket(group: 1, wire: 41, sequence: 1_008))
+        let duplicate = diagnostics.observe(
+            incompletePacket(group: 1, wire: 41, sequence: 1_010))
+        let boundary = diagnostics.observe(incompletePacket(group: 2, wire: 80, sequence: 1_016))
+        XCTAssertTrue(duplicate.duplicate)
+        XCTAssertEqual(boundary.closedGroup?.duplicateFragments, 1)
+        XCTAssertEqual(boundary.closedGroup?.correlation, .duplicate)
+    }
+
+    func testIncompleteAUDiagnosticsRecordsNextGroupDropReason() {
+        var diagnostics = NanoIncompleteAUDiagnostics()
+        _ = diagnostics.observe(incompletePacket(group: 1, wire: 40, sequence: 1_000))
+        _ = diagnostics.observe(incompletePacket(group: 1, wire: 42, sequence: 1_008))
+        let boundary = diagnostics.observe(incompletePacket(group: 2, wire: 80, sequence: 1_016))
+        XCTAssertEqual(boundary.closedGroup?.reason, .newGroupArrived)
+        XCTAssertEqual(boundary.closedGroup?.nextGroupArrived, true)
+    }
+
+    func testIncompleteAUDiagnosticsCorrelatesDatalinkSequenceGap() {
+        var diagnostics = NanoIncompleteAUDiagnostics()
+        _ = diagnostics.observe(incompletePacket(group: 1, wire: 40, sequence: 1_000))
+        let gap = diagnostics.observe(incompletePacket(group: 1, wire: 42, sequence: 1_016))
+        let boundary = diagnostics.observe(incompletePacket(group: 2, wire: 80, sequence: 1_024))
+        XCTAssertEqual(gap.newSequenceGaps, [1_008])
+        XCTAssertEqual(boundary.closedGroup?.udpSequenceGaps, [1_008])
+        XCTAssertEqual(boundary.closedGroup?.correlation, .udpSequenceGap)
+    }
+
+    func testIncompleteAUDiagnosticsDistinguishesAssemblerMissingWithContinuousSequence() {
+        var diagnostics = NanoIncompleteAUDiagnostics()
+        _ = diagnostics.observe(incompletePacket(group: 1, wire: 40, sequence: 1_000))
+        _ = diagnostics.observe(incompletePacket(group: 1, wire: 42, sequence: 1_008))
+        let boundary = diagnostics.observe(incompletePacket(group: 2, wire: 80, sequence: 1_016))
+        XCTAssertEqual(boundary.closedGroup?.udpSequenceGaps, [])
+        XCTAssertEqual(
+            boundary.closedGroup?.correlation, .assemblerMissingWithoutSequenceGap)
+    }
+
+    private func incompletePacket(
+        group: UInt16, wire: Int, sequence: UInt16, at: TimeInterval = 1.0
+    ) -> NanoIncompleteAUDiagnostics.Packet {
+        NanoIncompleteAUDiagnostics.Packet(
+            groupID: group, frameNumber: UInt8(truncatingIfNeeded: group), wireIndex: wire,
+            datalinkSequence: sequence, sourceTimestamp: nil, arrivalTime: at)
+    }
 }
