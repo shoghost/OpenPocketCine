@@ -3380,7 +3380,7 @@ final class CameraSession {
 
     func noteSceneBecameInactive() {
         #if OPENPOCKETCINE_DIAGNOSTICS
-            datalink?.resetDiagnosticNanoAccessUnitPacing(reason: "background")
+            datalink?.resetDiagnosticNanoTimedRendering(reason: "background")
             LiveFramePacingDiagnostics.shared.noteLifecycleBoundary()
         #endif
         if case .manualWifiJoin = phase {
@@ -3723,7 +3723,14 @@ final class CameraSession {
         }
         #if OPENPOCKETCINE_DIAGNOSTICS
             if connectedCamera?.model.family == .nano {
-                dl.enableDiagnosticNanoAccessUnitPacing()
+                let renderer = NanoTimedVideoRenderer(
+                    renderer: decoder.displayLayer.sampleBufferRenderer
+                ) { [weak self] event in
+                    Task { @MainActor [weak self] in
+                        self?.applyNanoTimedRendererEvent(event)
+                    }
+                }
+                dl.enableDiagnosticNanoTimedRendering(renderer)
             }
         #endif
         dl.onAccessUnit = { [weak self] accessUnit in
@@ -3882,6 +3889,19 @@ final class CameraSession {
     }
 
     #if OPENPOCKETCINE_DIAGNOSTICS
+    private func applyNanoTimedRendererEvent(_ event: NanoTimedVideoRenderer.Event) {
+        switch event {
+        case .format(let width, let height, let nalTypes):
+            decoder.noteDiagnosticTimedFormat(width: width, height: height, nalTypes: nalTypes)
+        case .enqueued(let isIDR, let nalTypes):
+            rawAccessUnits += 1
+            rawFramesEnqueued += 1
+            decoder.noteDiagnosticTimedSampleEnqueued(isIDR: isIDR, nalTypes: nalTypes)
+        case .controlledReset(let reason):
+            ControlLiveLog.line("timed-renderer: controlled_reset reason=\(reason)")
+        }
+    }
+
     private func ingestAccessUnit(_ accessUnit: LivePacedAccessUnit) {
         rawAccessUnits += 1
         if decoder.decode(accessUnit: accessUnit.bytes, trace: accessUnit.trace) {

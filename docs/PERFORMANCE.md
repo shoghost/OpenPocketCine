@@ -25,12 +25,13 @@ the same PR.
 | Battery | Sticky `ACTION_BATTERY_CHANGED` (Android); no 1 Hz poll | [`ANDROID.md`](../ANDROID.md) |
 
 The separate `OpenPocketCineTest` diagnostics target has one deliberate exception to the normal
-live-picture policy: `NanoAccessUnitPacer` holds 12 complete compressed Nano AVC access units
-(about 400 ms; maximum 60 / 2 s) before the existing decoder, then releases at 30 Hz. Receive writes
-directly into an `OSAllocatedUnfairLock`-protected queue; only the call into the MainActor decoder
-hops actors. Overflow never drops an arbitrary P-frame: the diagnostic path waits for an IDR and
-rebuffers. Production decode and presentation remain unpaced and keep the identity display-layer
-path.
+live-picture policy. `NanoTimedVideoRenderer` collects 12 complete compressed Nano AVC access units
+(about 400 ms; maximum 60 / 2 s), converts them to AVCC on a serial feeder queue, and enqueues several
+future-PTS samples through `AVSampleBufferDisplayLayer.sampleBufferRenderer`. Its 30 fps host-clock
+timeline keeps roughly 250–550 ms scheduled ahead; renderer backpressure waits without flushing or
+dropping a dependent P-frame. Format change, renderer failure, reconnect, or an explicit
+requires-flush signal performs a controlled reset and resumes at IDR. Production decode and
+presentation remain unchanged and keep the identity display-layer path.
 
 ## Threading
 

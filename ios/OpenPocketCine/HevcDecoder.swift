@@ -280,6 +280,26 @@ final class HevcDecoder {
     func decode(accessUnit: [UInt8], trace: LiveFrameTrace? = nil) -> Bool {
         decodeImpl(accessUnit: accessUnit, trace: trace)
     }
+
+    /// Timed Nano Test rendering performs compressed-sample construction off MainActor. These
+    /// callbacks only mirror presentation health into the existing session/watchdog state after the
+    /// renderer has accepted a future sample; they are not on the feeder's critical path.
+    func noteDiagnosticTimedFormat(width: Int32, height: Int32, nalTypes: Set<Int>) {
+        hasFormat = true
+        pictureSize = CGSize(width: Int(width), height: Int(height))
+        isVerticalPicture = EncoderPresentPath.isVertical(width: Int(width), height: Int(height))
+        nalTypesSeen.formUnion(nalTypes)
+    }
+
+    func noteDiagnosticTimedSampleEnqueued(isIDR: Bool, nalTypes: Set<Int>) {
+        nalTypesSeen.formUnion(nalTypes)
+        if isIDR {
+            sawKeyframe = true
+            awaitingIDR = false
+            lastKeyframeAt = Date()
+        }
+        notePresentedFrame(sampleRate: true)
+    }
     #else
     @discardableResult
     func decode(accessUnit: [UInt8]) -> Bool {

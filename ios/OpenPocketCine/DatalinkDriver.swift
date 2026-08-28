@@ -63,8 +63,10 @@ final class DatalinkDriver {
     /// Depacketize + video counters on the UDP queue. Main only hops complete AUs.
     nonisolated private let videoAssembler = SoftAPVideoAssembler()
     #if OPENPOCKETCINE_DIAGNOSTICS
-        /// Test-only Nano path: complete compressed AUs enter here before any MainActor hop.
-        nonisolated private let nanoAccessUnitPacer = NanoAccessUnitPacer()
+        /// Test-only Nano path: complete compressed AUs enter the timed renderer before any
+        /// MainActor hop. The lock only publishes/revokes the session-scoped renderer reference.
+        nonisolated private let nanoTimedRenderer = OSAllocatedUnfairLock(
+            initialState: NanoTimedVideoRenderer?.none)
     #endif
     /// Session/socket snapshot for the 40 Hz ACK pump (UDP queue, not MainActor).
     nonisolated private let wire = OSAllocatedUnfairLock(initialState: WireState())
@@ -149,18 +151,17 @@ final class DatalinkDriver {
     }
 
     #if OPENPOCKETCINE_DIAGNOSTICS
-        func enableDiagnosticNanoAccessUnitPacing() {
-            let pacer = nanoAccessUnitPacer
-            pacer.configure { [weak self, weak pacer] accessUnit in
-                Task(priority: .userInitiated) { @MainActor [weak self] in
-                    defer { pacer?.deliveryCompleted() }
-                    self?.onAccessUnit?(accessUnit)
-                }
+        func enableDiagnosticNanoTimedRendering(_ renderer: NanoTimedVideoRenderer) {
+            let old = nanoTimedRenderer.withLock { current -> NanoTimedVideoRenderer? in
+                let previous = current
+                current = renderer
+                return previous
             }
+            old?.stop()
         }
 
-        func resetDiagnosticNanoAccessUnitPacing(reason: String) {
-            nanoAccessUnitPacer.reset(reason: reason)
+        func resetDiagnosticNanoTimedRendering(reason: String) {
+            nanoTimedRenderer.withLock { $0 }?.reset(reason: reason)
         }
     #endif
 
@@ -366,7 +367,12 @@ final class DatalinkDriver {
     func close() {
         closed = true
         #if OPENPOCKETCINE_DIAGNOSTICS
-            nanoAccessUnitPacer.disable(reason: "datalink_close")
+            let renderer = nanoTimedRenderer.withLock { current -> NanoTimedVideoRenderer? in
+                let value = current
+                current = nil
+                return value
+            }
+            renderer?.stop()
         #endif
         onAccessUnit = nil
         onStatusFrame = nil
@@ -729,7 +735,7 @@ final class DatalinkDriver {
         // it from the UDP callback hopped to main and froze the feed when the UI was busy.
         let assembler = videoAssembler
         #if OPENPOCKETCINE_DIAGNOSTICS
-            let accessUnitPacer = nanoAccessUnitPacer
+            let timedRenderer = nanoTimedRenderer
         #endif
         let handshake = handshakeFlag
         let inbound = handshakeInbound
@@ -801,10 +807,10 @@ final class DatalinkDriver {
                     return
                 }
                 #if OPENPOCKETCINE_DIAGNOSTICS
-                    let paced = accessUnitPacer.isEnabled
-                    let assembled = assembler.ingest(bytes, queuePending: !paced)
-                    if paced, let accessUnit = assembled.accessUnit {
-                        accessUnitPacer.push(accessUnit)
+                    let renderer = timedRenderer.withLock { $0 }
+                    let assembled = assembler.ingest(bytes, queuePending: renderer == nil)
+                    if let renderer, let accessUnit = assembled.accessUnit {
+                        renderer.push(accessUnit)
                     }
                 #else
                     let assembled = assembler.ingest(bytes)
