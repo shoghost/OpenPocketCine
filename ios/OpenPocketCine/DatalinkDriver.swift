@@ -1278,9 +1278,7 @@ private final class SoftAPVideoAssembler: @unchecked Sendable {
                 ControlLiveLog.line(
                     "nano-datalink-gap: group_id=\(groupWord & 0x7fff) wire_index=\(wirePosition) datalink_seq=\(diagnosticSequence) missing_blocks=[\(gaps)]")
             }
-            if diagnosticObservation.duplicate || diagnosticObservation.reordered
-                || diagnosticObservation.lateFragment
-            {
+            if diagnosticObservation.shouldLogFragmentEvent {
                 ControlLiveLog.line(
                     "nano-fragment-event: group_id=\(groupWord & 0x7fff) wire_index=\(wirePosition) datalink_seq=\(diagnosticSequence) duplicate=\(diagnosticObservation.duplicate) reordered=\(diagnosticObservation.reordered) late=\(diagnosticObservation.lateFragment)")
             }

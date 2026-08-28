@@ -35,6 +35,7 @@ struct NanoIncompleteAUDiagnostics {
         var duplicate = false
         var reordered = false
         var lateFragment = false
+        var shouldLogFragmentEvent = false
     }
 
     struct DropEvent: Equatable, Sendable {
@@ -92,6 +93,7 @@ struct NanoIncompleteAUDiagnostics {
 
     private var current: Group?
     private var recentlyClosed: [ClosedGroup] = []
+    private var lastFragmentEventLogAt: TimeInterval = 0
 
     mutating func observe(_ packet: Packet) -> Observation {
         var observation = Observation()
@@ -164,6 +166,12 @@ struct NanoIncompleteAUDiagnostics {
         }
         group.missingSequenceBlocks.remove(block)
         if observation.lateFragment, !countedLate { group.lateCount += 1 }
+        if observation.duplicate || observation.reordered || observation.lateFragment,
+            packet.arrivalTime - lastFragmentEventLogAt >= 0.250
+        {
+            observation.shouldLogFragmentEvent = true
+            lastFragmentEventLogAt = packet.arrivalTime
+        }
         current = group
         return observation
     }
