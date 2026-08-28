@@ -20,6 +20,8 @@ struct LivePacedAccessUnit: Sendable {
 enum FramePacingStage: String, CaseIterable, Sendable {
     case udpFrameArrival = "udp_frame_arrival"
     case accessUnitComplete = "access_unit_complete"
+    case accessUnitBufferInput = "au_buffer_input"
+    case accessUnitBufferOutput = "au_buffer_output"
     case decoderInput = "decoder_input"
     case decoderOutput = "decoder_output"
     case displaySubmit = "display_submit"
@@ -107,6 +109,14 @@ final class LiveFramePacingDiagnostics: @unchecked Sendable {
         var duplicateFragments = 0
         var reorderedFragments = 0
         var idrWaitDrops = 0
+        var vtCallbackCount = 0
+        var lastVTCallbackAt: TimeInterval?
+        var vtCallbackIntervals: [TimeInterval] = []
+        var vtStatusHistogram: [Int32: Int] = [:]
+        var vtInfoFlagsHistogram: [UInt32: Int] = [:]
+        var vtFrameDroppedCount = 0
+        var vtNilImageBufferCount = 0
+        var vtSuccessfulImageBufferCount = 0
         var csvRows: [String] = []
     }
 
@@ -152,6 +162,14 @@ final class LiveFramePacingDiagnostics: @unchecked Sendable {
         note(.accessUnitComplete, trace: trace, at: trace.accessUnitComplete)
     }
 
+    func noteAccessUnitBufferInput(_ trace: LiveFrameTrace, at time: TimeInterval) {
+        note(.accessUnitBufferInput, trace: trace, at: time)
+    }
+
+    func noteAccessUnitBufferOutput(_ trace: LiveFrameTrace, at time: TimeInterval) {
+        note(.accessUnitBufferOutput, trace: trace, at: time)
+    }
+
     func noteDecoderInput(_ trace: LiveFrameTrace) {
         note(.decoderInput, trace: trace, at: ProcessInfo.processInfo.systemUptime)
     }
@@ -161,6 +179,36 @@ final class LiveFramePacingDiagnostics: @unchecked Sendable {
         at time: TimeInterval = ProcessInfo.processInfo.systemUptime
     ) {
         note(.decoderOutput, trace: trace, at: time)
+    }
+
+    /// Called at the very start of every VideoToolbox output callback, before status/self/image
+    /// guards, so callback cadence and decoder outcomes are not biased toward successful images.
+    func noteVideoToolboxCallback(
+        status: Int32,
+        infoFlags: UInt32,
+        frameDropped: Bool,
+        hasImageBuffer: Bool,
+        at time: TimeInterval
+    ) {
+        lock.withLock { state in
+            state.vtCallbackCount += 1
+            if let previous = state.lastVTCallbackAt, time > previous {
+                state.vtCallbackIntervals.append(time - previous)
+                if state.vtCallbackIntervals.count > historyLimit {
+                    state.vtCallbackIntervals.removeFirst(
+                        state.vtCallbackIntervals.count - historyLimit)
+                }
+            }
+            state.lastVTCallbackAt = time
+            state.vtStatusHistogram[status, default: 0] += 1
+            state.vtInfoFlagsHistogram[infoFlags, default: 0] += 1
+            if frameDropped { state.vtFrameDroppedCount += 1 }
+            if hasImageBuffer {
+                if status == 0 { state.vtSuccessfulImageBufferCount += 1 }
+            } else {
+                state.vtNilImageBufferCount += 1
+            }
+        }
     }
 
     func noteDisplaySubmit(_ trace: LiveFrameTrace) {
@@ -195,6 +243,7 @@ final class LiveFramePacingDiagnostics: @unchecked Sendable {
             state.frames.removeAll(keepingCapacity: true)
             state.lastStageTime.removeAll(keepingCapacity: true)
             state.lastSourceTimestamp = nil
+            state.lastVTCallbackAt = nil
             return pending
         }
         flush(rows)
@@ -306,10 +355,12 @@ final class LiveFramePacingDiagnostics: @unchecked Sendable {
         }
         return [
             String(id), frame.sourceTimestamp.map { String($0) } ?? "",
-            value(.udpFrameArrival), value(.accessUnitComplete), value(.decoderInput),
-            value(.decoderOutput), value(.displaySubmit), interval(.udpFrameArrival),
-            interval(.accessUnitComplete), interval(.decoderInput), interval(.decoderOutput),
-            interval(.displaySubmit), frame.sourceDeltaMs.map { String(format: "%.3f", $0) } ?? "",
+            value(.udpFrameArrival), value(.accessUnitComplete), value(.accessUnitBufferInput),
+            value(.accessUnitBufferOutput), value(.decoderInput), value(.decoderOutput),
+            value(.displaySubmit), interval(.udpFrameArrival), interval(.accessUnitComplete),
+            interval(.accessUnitBufferInput), interval(.accessUnitBufferOutput),
+            interval(.decoderInput), interval(.decoderOutput), interval(.displaySubmit),
+            frame.sourceDeltaMs.map { String(format: "%.3f", $0) } ?? "",
             cause.rawValue,
         ].joined(separator: ",")
     }
@@ -320,10 +371,25 @@ final class LiveFramePacingDiagnostics: @unchecked Sendable {
             let gaps = [50, 66, 100, 150].map {
                 "gt\($0)=\(state.gapCounts[stage]?[$0] ?? 0)"
             }.joined(separator: "/")
-            return "\(stage.rawValue){n=\(stats.count) med=\(f(stats.medianMs)) p95=\(f(stats.p95Ms)) p99=\(f(stats.p99Ms)) max=\(f(stats.maxMs)) \(gaps)}"
+            let name: String
+            switch stage {
+            case .udpFrameArrival: name = "udp_frame_interval_ms"
+            case .accessUnitComplete: name = "au_complete_interval_ms"
+            case .accessUnitBufferInput: name = "au_buffer_input_interval_ms"
+            case .accessUnitBufferOutput: name = "au_buffer_output_interval_ms"
+            case .decoderInput: name = "decoder_input_interval_ms"
+            case .decoderOutput: name = "decoder_output_interval_ms"
+            case .displaySubmit: name = "display_submit_interval_ms"
+            }
+            return "\(name){n=\(stats.count) med=\(f(stats.medianMs)) p95=\(f(stats.p95Ms)) p99=\(f(stats.p99Ms)) max=\(f(stats.maxMs)) \(gaps)}"
         }.joined(separator: " ")
         let source = FramePacingIntervalSummary(intervalsSeconds: state.sourceIntervals)
-        return "pacing: \(stages) source_ts{n=\(source.count) med=\(f(source.medianMs)) p95=\(f(source.p95Ms)) p99=\(f(source.p99Ms)) max=\(f(source.maxMs))} incomplete=\(state.incompleteFrames) dup=\(state.duplicateFragments) reorder=\(state.reorderedFragments) idrWait=\(state.idrWaitDrops)"
+        let vt = FramePacingIntervalSummary(intervalsSeconds: state.vtCallbackIntervals)
+        let statuses = state.vtStatusHistogram.sorted { $0.key < $1.key }
+            .map { "\($0.key):\($0.value)" }.joined(separator: "/")
+        let flags = state.vtInfoFlagsHistogram.sorted { $0.key < $1.key }
+            .map { String(format: "0x%X:%d", $0.key, $0.value) }.joined(separator: "/")
+        return "pacing: \(stages) source_timestamp_interval_ms{n=\(source.count) med=\(f(source.medianMs)) p95=\(f(source.p95Ms)) p99=\(f(source.p99Ms)) max=\(f(source.maxMs))} vt_callback_interval_ms{n=\(vt.count) med=\(f(vt.medianMs)) p95=\(f(vt.p95Ms)) p99=\(f(vt.p99Ms)) max=\(f(vt.maxMs))} vt_callbacks=\(state.vtCallbackCount) vt_status{\(statuses)} vt_info_flags{\(flags)} vt_frame_dropped=\(state.vtFrameDroppedCount) vt_nil_image=\(state.vtNilImageBufferCount) vt_success_image=\(state.vtSuccessfulImageBufferCount) incomplete=\(state.incompleteFrames) dup=\(state.duplicateFragments) reorder=\(state.reorderedFragments) idrWait=\(state.idrWaitDrops)"
     }
 
     private static func f(_ value: Double) -> String { String(format: "%.1f", value) }
@@ -340,7 +406,7 @@ final class LiveFramePacingDiagnostics: @unchecked Sendable {
             for: .documentDirectory, in: .userDomainMask
         ).first else { return }
         let url = directory.appendingPathComponent(fileName)
-        let header = "frame_id,source_timestamp,udp_arrival_s,au_complete_s,decoder_input_s,decoder_output_s,display_submit_s,udp_interval_ms,au_interval_ms,decoder_input_interval_ms,decoder_output_interval_ms,display_interval_ms,source_interval_ms,cause\n"
+        let header = "frame_id,source_timestamp,udp_arrival_s,au_complete_s,au_buffer_input_s,au_buffer_output_s,decoder_input_s,decoder_output_s,display_submit_s,udp_interval_ms,au_interval_ms,au_buffer_input_interval_ms,au_buffer_output_interval_ms,decoder_input_interval_ms,decoder_output_interval_ms,display_interval_ms,source_interval_ms,cause\n"
         if !FileManager.default.fileExists(atPath: url.path) {
             try? Data(header.utf8).write(to: url)
         }

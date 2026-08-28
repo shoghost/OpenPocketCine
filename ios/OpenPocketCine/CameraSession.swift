@@ -3380,7 +3380,7 @@ final class CameraSession {
 
     func noteSceneBecameInactive() {
         #if OPENPOCKETCINE_DIAGNOSTICS
-            decoder.resetDisplayPacerForBackground()
+            datalink?.resetDiagnosticNanoAccessUnitPacing(reason: "background")
             LiveFramePacingDiagnostics.shared.noteLifecycleBoundary()
         #endif
         if case .manualWifiJoin = phase {
@@ -3721,6 +3721,11 @@ final class CameraSession {
         dl.onStatusFrame = { [weak self] frame in
             self?.applyIncomingStatus(frame)
         }
+        #if OPENPOCKETCINE_DIAGNOSTICS
+            if connectedCamera?.model.family == .nano {
+                dl.enableDiagnosticNanoAccessUnitPacing()
+            }
+        #endif
         dl.onAccessUnit = { [weak self] accessUnit in
             self?.ingestAccessUnit(accessUnit)
         }

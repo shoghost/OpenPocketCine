@@ -1,5 +1,3 @@
-import CoreVideo
-import OpenPocketViewCore
 import XCTest
 @testable import OpenPocketCineTest
 
@@ -44,42 +42,33 @@ final class DiagnosticsTargetTests: XCTestCase {
         }
     }
 
-    @MainActor
-    func testNanoDisplayPacerUsesBoundedStabilityReservoir() {
-        XCTAssertEqual(NanoDisplayPacer.framesPerSecond, 30)
-        XCTAssertEqual(NanoDisplayPacer.cadence, 1.0 / 30.0, accuracy: 0.000_001)
-        XCTAssertEqual(NanoDisplayPacer.targetDepth, 24)
-        XCTAssertEqual(NanoDisplayPacer.maximumDepth, 45)
+    func testNanoAccessUnitPacerUsesBoundedStabilityReservoir() {
+        XCTAssertEqual(NanoAccessUnitPacer.framesPerSecond, 30)
+        XCTAssertEqual(NanoAccessUnitPacer.cadence, 1.0 / 30.0, accuracy: 0.000_001)
+        XCTAssertEqual(NanoAccessUnitPacer.targetDepth, 12)
+        XCTAssertEqual(NanoAccessUnitPacer.maximumDepth, 60)
     }
 
-    func testNanoFrameBufferAcceptsDecodedFrameWithoutMainActorHop() throws {
-        var created: CVPixelBuffer?
-        XCTAssertEqual(
-            CVPixelBufferCreate(
-                kCFAllocatorDefault,
-                16,
-                16,
-                kCVPixelFormatType_32BGRA,
-                nil,
-                &created),
-            kCVReturnSuccess)
-        let pixelBuffer = try XCTUnwrap(created)
-        let storage = NanoDisplayFrameBuffer()
-        let pushed = expectation(description: "decoded frame pushed off main")
+    func testNanoAccessUnitPacerAcceptsCompleteAUWithoutMainActorHop() {
+        let pacer = NanoAccessUnitPacer()
+        pacer.configure { _ in }
+        let now = ProcessInfo.processInfo.systemUptime
+        let accessUnit = LivePacedAccessUnit(
+            bytes: [0, 0, 0, 1, 0x41, 0x80],
+            trace: LiveFrameTrace(
+                id: 1, udpArrival: now, accessUnitComplete: now,
+                sourceTimestamp: 1_000))
+        let pushed = expectation(description: "compressed AU pushed off main")
         DispatchQueue.global(qos: .userInitiated).async {
-            storage.push(
-                imageBuffer: pixelBuffer,
-                effects: LiveImageEffects(),
-                transfer: .rec709,
-                trace: nil,
-                callbackAt: ProcessInfo.processInfo.systemUptime)
+            pacer.push(accessUnit)
             pushed.fulfill()
         }
         wait(for: [pushed], timeout: 1)
 
-        let metrics = storage.takeMetrics()
+        let metrics = pacer.takeMetrics()
         XCTAssertEqual(metrics.inputCount, 1)
         XCTAssertEqual(metrics.depth, 1)
-        XCTAssertEqual(metrics.enqueueDurations.count, 1)
+        XCTAssertEqual(metrics.outputCount, 0)
+        pacer.disable(reason: "unit_test")
     }
 }

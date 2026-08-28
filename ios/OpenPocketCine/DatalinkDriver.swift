@@ -62,6 +62,10 @@ final class DatalinkDriver {
 
     /// Depacketize + video counters on the UDP queue. Main only hops complete AUs.
     nonisolated private let videoAssembler = SoftAPVideoAssembler()
+    #if OPENPOCKETCINE_DIAGNOSTICS
+        /// Test-only Nano path: complete compressed AUs enter here before any MainActor hop.
+        nonisolated private let nanoAccessUnitPacer = NanoAccessUnitPacer()
+    #endif
     /// Session/socket snapshot for the 40 Hz ACK pump (UDP queue, not MainActor).
     nonisolated private let wire = OSAllocatedUnfairLock(initialState: WireState())
     /// Last pid `0x38` GET write / reply. Keepalive BLE fallback reads these; UDP queue stamps reply.
@@ -143,6 +147,22 @@ final class DatalinkDriver {
         self.tcpPoke = tcpPoke
         self.pairingToken = pairingToken
     }
+
+    #if OPENPOCKETCINE_DIAGNOSTICS
+        func enableDiagnosticNanoAccessUnitPacing() {
+            let pacer = nanoAccessUnitPacer
+            pacer.configure { [weak self, weak pacer] accessUnit in
+                Task(priority: .userInitiated) { @MainActor [weak self] in
+                    defer { pacer?.deliveryCompleted() }
+                    self?.onAccessUnit?(accessUnit)
+                }
+            }
+        }
+
+        func resetDiagnosticNanoAccessUnitPacing(reason: String) {
+            nanoAccessUnitPacer.reset(reason: reason)
+        }
+    #endif
 
     private var handshakeAcked: Bool {
         get { handshakeFlag.withLock { $0 } }
@@ -345,6 +365,9 @@ final class DatalinkDriver {
 
     func close() {
         closed = true
+        #if OPENPOCKETCINE_DIAGNOSTICS
+            nanoAccessUnitPacer.disable(reason: "datalink_close")
+        #endif
         onAccessUnit = nil
         onStatusFrame = nil
         ackTimer?.cancel()
@@ -705,6 +728,9 @@ final class DatalinkDriver {
         // is scheduled on `q` immediately. `startReceiveLoop()` is MainActor-isolated — calling
         // it from the UDP callback hopped to main and froze the feed when the UI was busy.
         let assembler = videoAssembler
+        #if OPENPOCKETCINE_DIAGNOSTICS
+            let accessUnitPacer = nanoAccessUnitPacer
+        #endif
         let handshake = handshakeFlag
         let inbound = handshakeInbound
         let gate = videoGate
@@ -774,7 +800,15 @@ final class DatalinkDriver {
                     }
                     return
                 }
-                let assembled = assembler.ingest(bytes)
+                #if OPENPOCKETCINE_DIAGNOSTICS
+                    let paced = accessUnitPacer.isEnabled
+                    let assembled = assembler.ingest(bytes, queuePending: !paced)
+                    if paced, let accessUnit = assembled.accessUnit {
+                        accessUnitPacer.push(accessUnit)
+                    }
+                #else
+                    let assembled = assembler.ingest(bytes)
+                #endif
                 if assembled.firstPacket {
                     let count = bytes.count
                     Task { @MainActor in
@@ -1181,7 +1215,7 @@ private final class SoftAPVideoAssembler: @unchecked Sendable {
 
     private let lock = OSAllocatedUnfairLock(initialState: State())
 
-    func ingest(_ datagram: [UInt8]) -> Ingest {
+    func ingest(_ datagram: [UInt8], queuePending: Bool = true) -> Ingest {
         lock.withLock { state in
             state.packets += 1
             state.lastPacket = Date()
@@ -1240,13 +1274,15 @@ private final class SoftAPVideoAssembler: @unchecked Sendable {
                 #endif
                 state.accessUnits += 1
                 state.lastAU = Date()
-                state.pending.append(au)
-                if state.pending.count > 8 {
-                    state.pending.removeFirst(state.pending.count - 8)
-                }
-                if !state.hopScheduled {
-                    state.hopScheduled = true
-                    shouldHop = true
+                if queuePending {
+                    state.pending.append(au)
+                    if state.pending.count > 8 {
+                        state.pending.removeFirst(state.pending.count - 8)
+                    }
+                    if !state.hopScheduled {
+                        state.hopScheduled = true
+                        shouldHop = true
+                    }
                 }
             }
             return Ingest(accessUnit: au, firstPacket: first, shouldHop: shouldHop)

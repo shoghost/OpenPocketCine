@@ -129,10 +129,6 @@ final class HevcDecoder {
     private let assistEngine = LiveAssistEngine()
     private let log = Logger(subsystem: "com.opencapture.openpocketcine", category: "hevc")
     private let loggedLiveVT = OSAllocatedUnfairLock(initialState: false)
-    #if OPENPOCKETCINE_DIAGNOSTICS
-        /// Nano-only, decoded-frame presentation pacing. Production never compiles this member.
-        nonisolated private let nanoDisplayPacer: NanoDisplayPacer
-    #endif
     /// Simulator (and any pixel-buffer-only source) paints identity on `CIFeedView`.
     private var prefersPixelBufferDisplay = false
     /// Fast / Quality / AI must present through Metal. Off keeps the identity HEVC layer.
@@ -166,10 +162,6 @@ final class HevcDecoder {
     }
 
     private var shouldStartVT: Bool {
-        #if OPENPOCKETCINE_DIAGNOSTICS
-            // Safe presentation drops require independent decoded frames, never compressed AVC AUs.
-            if liveCodec == .avc { return true }
-        #endif
         if prefersPixelBufferDisplay { return true }
         guard hardwareDecoderUnlocked else { return false }
         return effects.needsSample || sessionOwnsVT
@@ -202,19 +194,7 @@ final class HevcDecoder {
     private var vtAttemptedStamp: (vps: [UInt8], sps: [UInt8], pps: [UInt8])?
 
     init() {
-        #if OPENPOCKETCINE_DIAGNOSTICS
-            nanoDisplayPacer = NanoDisplayPacer()
-        #endif
         displayLayer.videoGravity = .resizeAspect
-        #if OPENPOCKETCINE_DIAGNOSTICS
-            nanoDisplayPacer.onPresent = { [weak self] frame in
-                self?.handleDecodedFrame(
-                    frame.imageBuffer,
-                    effects: frame.effects,
-                    transfer: frame.transfer,
-                    trace: frame.trace)
-            }
-        #endif
         // OpenZCine: fused-peaking self-check is ~0.5 s. Do it before the first PEAK frame.
         Task.detached(priority: .utility) { _ = LiveMonitorCompositor.fusedPeakingAvailable }
     }
@@ -508,9 +488,6 @@ final class HevcDecoder {
         vtRebuildCount = 0
         frameIndex = 0
         loggedLiveVT.withLock { $0 = false }
-        #if OPENPOCKETCINE_DIAGNOSTICS
-            nanoDisplayPacer.reset(reason: "decoder_reset")
-        #endif
         assistEngine.reset()
         sampleBus?.reset()
         // Invalidate VT and flush the layer. That is the Android analog of
@@ -608,21 +585,12 @@ final class HevcDecoder {
     /// last picture. Do **not** begin an IDR hold here — that dropped every
     /// P-frame after Control Center when 0x09/0xa8 was then skipped.
     func prepareAfterForeground() {
-        #if OPENPOCKETCINE_DIAGNOSTICS
-            nanoDisplayPacer.reset(reason: "foreground")
-        #endif
         if displayLayer.status == .failed || displayLayer.requiresFlushToResumeDecoding {
             displayLayer.flush()
         }
         if displayLayer.status == .failed { displayedImageRemoved = true }
         if shouldStartVT, format != nil { rebuildVT(force: true) }
     }
-
-    #if OPENPOCKETCINE_DIAGNOSTICS
-        func resetDisplayPacerForBackground() {
-            nanoDisplayPacer.reset(reason: "background")
-        }
-    #endif
 
     private func releaseLayerDecoderIfNeeded() {
         // Do not flushAndRemoveImage — the layer keeps the last picture so LUT-off
@@ -958,9 +926,6 @@ final class HevcDecoder {
             displayLayer.flush()
         }
         invalidateVT()
-        #if OPENPOCKETCINE_DIAGNOSTICS
-            nanoDisplayPacer.reset(reason: "format_change")
-        #endif
         vtAttemptedStamp = nil
         beginIDRHold()
         pendingParameterChangeEnable = true
@@ -1231,7 +1196,17 @@ final class HevcDecoder {
     ) -> OSStatus {
         VTDecompressionSessionDecodeFrame(
             session, sampleBuffer: sample, flags: flags, infoFlagsOut: nil
-        ) { [weak self] status, _, imageBuffer, _, _ in
+        ) { [weak self] status, infoFlags, imageBuffer, _, _ in
+            #if OPENPOCKETCINE_DIAGNOSTICS
+                let callbackAt = ProcessInfo.processInfo.systemUptime
+                let infoRaw = UInt32(infoFlags.rawValue)
+                LiveFramePacingDiagnostics.shared.noteVideoToolboxCallback(
+                    status: status,
+                    infoFlags: infoRaw,
+                    frameDropped: infoFlags.contains(.frameDropped),
+                    hasImageBuffer: imageBuffer != nil,
+                    at: callbackAt)
+            #endif
             guard let self else { return }
             if status != noErr {
                 if Self.shouldRebuildSession(status: status) {
@@ -1246,18 +1221,13 @@ final class HevcDecoder {
             }
             guard let imageBuffer, Self.isPresentable(imageBuffer) else { return }
             #if OPENPOCKETCINE_DIAGNOSTICS
-                let callbackAt = ProcessInfo.processInfo.systemUptime
-                self.nanoDisplayPacer.enqueueFromVideoToolbox(
-                    imageBuffer: imageBuffer,
-                    effects: effects,
-                    transfer: transfer,
-                    trace: trace,
-                    callbackAt: callbackAt)
                 if let trace {
                     LiveFramePacingDiagnostics.shared.noteDecoderOutput(
                         trace, at: callbackAt)
                 }
                 self.logFirstLiveVT(imageBuffer)
+                self.handleDecodedFrame(
+                    imageBuffer, effects: effects, transfer: transfer, trace: trace)
             #else
                 self.logFirstLiveVT(imageBuffer)
                 self.handleDecodedFrame(imageBuffer, effects: effects, transfer: transfer)
