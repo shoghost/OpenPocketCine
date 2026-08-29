@@ -23,15 +23,15 @@ import os
 /// Video (pktType 0x02) is best-effort UDP. Mimo keeps the camera's send windows open with a
 /// pktType-0x04 ACK ~40 times a second: group 0 = latest video seq, group 1 = latest
 /// pktType-0x03 (command replies, including Flip GET), group 2 = telemetry extra. Receive is
-/// re-armed on the UDP queue (never the main actor) so a busy UI cannot stall the socket.
+/// drained to EAGAIN on the UDP queue (never the main actor) so a busy UI cannot stall the socket.
 @MainActor
 final class DatalinkDriver {
     private let port: UInt16
     private let tcpPoke: Bool
     private let pairingToken: String
-    private let q = DispatchQueue(label: "opv.datalink.udp")
+    private let q = DispatchQueue(label: "opv.datalink.udp", qos: .userInteractive)
     nonisolated private let udpProcessor = UDPDatagramProcessor()
-    private var conn: NWConnection?
+    private var udpSocket: BSDUDPSocket?
     private var pokeConn: NWConnection?  // kept open for the session; Mimo does not RST 7001
     private var ackTimer: DispatchSourceTimer?
     private var pathMonitor: NWPathMonitor?
@@ -59,7 +59,7 @@ final class DatalinkDriver {
     /// Inbound datagrams seen before the ACK. Zero on a miss means the reader
     /// is dead or the camera never heard us.
     nonisolated private let handshakeInbound = OSAllocatedUnfairLock(initialState: 0)
-    /// `receiveMessage` has been armed on the current `conn`.
+    /// The BSD socket read source has been armed for the current generation.
     private var receiveArmed = false
     /// `close()` is terminal. Handshake on this instance after disconnect
     /// inherited a half-dead UDP session.
@@ -73,7 +73,7 @@ final class DatalinkDriver {
         var loggedDrop = false
     }
 
-    /// Depacketize + video counters on the UDP queue. Main only hops complete AUs.
+    /// Depacketize + video counters on the ordered UDP processing queue. Main only hops complete AUs.
     nonisolated private let videoAssembler = SoftAPVideoAssembler()
     /// Nano path: smooth encoded-AU arrival cadence before the normal MainActor callback.
     nonisolated private let nanoArrivalJitterBuffer = OSAllocatedUnfairLock(
@@ -96,7 +96,7 @@ final class DatalinkDriver {
     private struct WireState {
         var sessionId: UInt16 = 0
         var baseSeq: UInt16 = 0
-        var conn: NWConnection?
+        var udpSocket: BSDUDPSocket?
         var dumlSeq: UInt16 = 0xA000
         var cmdCounter: UInt8 = 0
         var udpSeq: UInt16 = 0
@@ -124,7 +124,7 @@ final class DatalinkDriver {
         if case .ready = pokeConn.state { return true }
         return false
     }
-    /// Last command `send` completion. `nil` until Network.framework reports.
+    /// Last tracked command send result. `nil` until the BSD socket queue reports.
     var lastWriteLanded: Bool? { lastCommandWriteLanded }
     var isFlowHealthy: Bool { writeHealthy && isConnectionReady }
     var isRebuilding: Bool { rebuilding }
@@ -138,20 +138,14 @@ final class DatalinkDriver {
     }
 
     private var isConnectionReady: Bool {
-        guard let conn else { return false }
-        if case .ready = conn.state { return true }
-        return false
+        udpSocket?.isOpen == true
     }
 
     private var flowHealth: CameraSoftAP.DatalinkFlowHealth {
         if !WiFiJoiner.isCameraPathReady() { return .pathLost }
-        guard let conn else { return .notReady }
-        switch conn.state {
-        case .ready: return writeHealthy ? .ready : .writeRejected
-        case .cancelled: return .cancelled
-        case .failed, .waiting: return .notReady
-        default: return .notReady
-        }
+        guard let udpSocket else { return .notReady }
+        guard udpSocket.isOpen else { return .cancelled }
+        return writeHealthy ? .ready : .writeRejected
     }
 
     init(port: UInt16, tcpPoke: Bool, pairingToken: String) {
@@ -459,13 +453,12 @@ final class DatalinkDriver {
         udpGeneration += 1
         udpProcessor.activate(generation: udpGeneration)
         receiveArmed = false
-        let old = conn
-        conn = nil
+        let old = udpSocket
+        udpSocket = nil
         wire.withLock {
-            $0.conn = nil
+            $0.udpSocket = nil
             $0.liveAccepting = false
         }
-        old?.stateUpdateHandler = nil
         old?.cancel()
     }
 
@@ -545,64 +538,43 @@ final class DatalinkDriver {
 
     private func write(_ bytes: [UInt8], trackCommand: Bool = false) {
         if closed { return }
-        guard let conn else {
+        guard let udpSocket, udpSocket.isOpen else {
             writeHealthy = false
             if trackCommand { lastCommandWriteLanded = false }
             return
         }
-        switch conn.state {
-        case .ready:
-            break
-        case .cancelled, .failed:
-            if trackCommand { lastCommandWriteLanded = false }
-            return
-        default:
-            // Not-ready is not a dead flow. Tracked SETs skip — latching
-            // writeHealthy here used to tear UDP during LUT / zoom. Untracked
-            // pid 0x38 GET follows the ACK pump: video still flows on
-            // `.waiting`, and skipping the GET froze Flip after a few seconds.
-            if trackCommand {
-                lastCommandWriteLanded = false
-                log.info(
-                    "datalink: skip write — UDP not ready (\(String(describing: conn.state), privacy: .public))"
-                )
-                return
-            }
-        }
         let generation = udpGeneration
-        let socket = conn
+        let socket = udpSocket
         if !trackCommand {
-            conn.send(content: Data(bytes), completion: .idempotent)
+            socket.send(Data(bytes))
             return
         }
-        conn.send(
-            content: Data(bytes),
-            completion: .contentProcessed { [weak self] error in
-                guard let self else { return }
-                if let error {
-                    Task { @MainActor in
-                        guard
-                            CameraSoftAP.shouldApplyStaleSocketHealth(
-                                isLiveConnection: self.udpGeneration == generation
-                                    && self.conn === socket
-                            )
-                        else { return }
-                        let wasHealthy = self.writeHealthy
-                        self.writeHealthy = false
-                        self.lastCommandWriteLanded = false
-                        if wasHealthy {
-                            self.log.info(
-                                "datalink: write rejected (\(error.localizedDescription, privacy: .public))"
-                            )
-                        }
-                    }
-                } else {
-                    Task { @MainActor in
-                        guard self.udpGeneration == generation else { return }
-                        self.lastCommandWriteLanded = true
+        socket.send(Data(bytes)) { [weak self] error in
+            guard let self else { return }
+            if let error {
+                Task { @MainActor in
+                    guard
+                        CameraSoftAP.shouldApplyStaleSocketHealth(
+                            isLiveConnection: self.udpGeneration == generation
+                                && self.udpSocket === socket
+                        )
+                    else { return }
+                    let wasHealthy = self.writeHealthy
+                    self.writeHealthy = false
+                    self.lastCommandWriteLanded = false
+                    if wasHealthy {
+                        self.log.info(
+                            "datalink: write rejected (\(error.localizedDescription, privacy: .public))"
+                        )
                     }
                 }
-            })
+            } else {
+                Task { @MainActor in
+                    guard self.udpGeneration == generation else { return }
+                    self.lastCommandWriteLanded = true
+                }
+            }
+        }
     }
 
     /// Mimo ACKs ~41 Hz (p50 24.4 ms) with cursor = latest video transport seq. 1 Hz is not enough
@@ -628,25 +600,21 @@ final class DatalinkDriver {
     /// Window ACK from the UDP queue. Does not hop to MainActor.
     nonisolated private func sendWindowAck() {
         let cursor = videoAssembler.peerCursor(fallback: 0)
-        let (session, base, conn, acked, extra) = wire.withLock {
+        let (session, base, udpSocket, acked, extra) = wire.withLock {
             (
-                $0.sessionId, $0.baseSeq, $0.conn,
+                $0.sessionId, $0.baseSeq, $0.udpSocket,
                 $0.ackedDataCursor == 0 ? $0.baseSeq : $0.ackedDataCursor,
                 $0.extraCursor == 0 ? $0.baseSeq : $0.extraCursor
             )
         }
-        guard let conn else { return }
-        switch conn.state {
-        case .cancelled, .failed: return
-        default: break
-        }
+        guard let udpSocket, udpSocket.isOpen else { return }
         let payload = DumlTransport.ackPayload(
             peerCursor: cursor, ackedDataCursor: acked, extraCursor: extra)
         let pkt =
             DumlTransport.transportHeader(
                 pktType: 0x04, payloadLen: payload.count, sessionId: session, seq: 0
             ) + payload
-        conn.send(content: Data(pkt), completion: .idempotent)
+        udpSocket.send(Data(pkt))
         #if OPENPOCKETCINE_DIAGNOSTICS
             let diagnostic = NanoWindowAckDiagnostics.shared.noteAck(
                 at: ProcessInfo.processInfo.systemUptime, ackSequence: 0,
@@ -660,7 +628,7 @@ final class DatalinkDriver {
         #endif
     }
 
-    /// Mimo GETs pid `0x38` ~1 Hz on the live UDP socket — same conn as the
+    /// Mimo GETs pid `0x38` ~1 Hz on the same live UDP socket as the
     /// window ACK. MainActor `sendUntracked` timestamped writes that never
     /// left, and overlapping Tasks flooded the camera so replies stopped.
     nonisolated private func tickSelfieFlipGET() {
@@ -668,13 +636,13 @@ final class DatalinkDriver {
         enum Built {
             case wait
             case skip(String)
-            case send(NWConnection, [UInt8], UInt16)
+            case send(BSDUDPSocket, [UInt8], UInt16)
         }
         let built: Built = wire.withLock { w in
             guard now - w.lastFlipGetAt >= 1 else { return .wait }
             w.lastFlipGetAt = now
             guard w.liveAccepting else { return .skip("notLive") }
-            guard let conn = w.conn else { return .skip("noConn") }
+            guard let udpSocket = w.udpSocket else { return .skip("noConn") }
             w.cmdCounter &+= 1
             var f = Commands.getSelfieFlip()
             f.seq = w.dumlSeq
@@ -687,23 +655,19 @@ final class DatalinkDriver {
                     pktType: 0x05, payloadLen: routing.count + duml.count,
                     sessionId: w.sessionId, seq: w.udpSeq) + routing + duml
             w.udpSeq &+= 8
-            return .send(conn, pkt, seq)
+            return .send(udpSocket, pkt, seq)
         }
         switch built {
         case .wait:
             return
         case .skip(let why):
             ControlLiveLog.line("flip: skip udp \(why)")
-        case .send(let conn, let pkt, let seq):
-            switch conn.state {
-            case .cancelled, .failed:
-                ControlLiveLog.line(
-                    "flip: skip udp conn=\(String(describing: conn.state)) seq=\(seq)")
+        case .send(let udpSocket, let pkt, let seq):
+            guard udpSocket.isOpen else {
+                ControlLiveLog.line("flip: skip udp socket=closed seq=\(seq)")
                 return
-            default:
-                break
             }
-            conn.send(content: Data(pkt), completion: .idempotent)
+            udpSocket.send(Data(pkt))
             ControlLiveLog.line("flip: send udp seq=\(seq) bytes=\(pkt.count)")
             Task { @MainActor [weak self] in
                 self?.lastSelfieFlipSendAt = Date()
@@ -718,11 +682,11 @@ final class DatalinkDriver {
     private func syncWire() {
         let sid = sessionId
         let base = baseSeq
-        let socket = conn
+        let socket = udpSocket
         wire.withLock {
             $0.sessionId = sid
             $0.baseSeq = base
-            $0.conn = socket
+            $0.udpSocket = socket
         }
     }
 
@@ -730,14 +694,14 @@ final class DatalinkDriver {
     private func primeWireSeqs() {
         let sid = sessionId
         let base = baseSeq
-        let socket = conn
+        let socket = udpSocket
         let ds = dumlSeq
         let cc = cmdCounter
         let us = udpSeq
         wire.withLock {
             $0.sessionId = sid
             $0.baseSeq = base
-            $0.conn = socket
+            $0.udpSocket = socket
             $0.dumlSeq = ds
             $0.cmdCounter = cc
             $0.udpSeq = us
@@ -774,10 +738,9 @@ final class DatalinkDriver {
     // ---- receive ---------------------------------------------------------------------------------
 
     private func startReceiveLoop() {
-        guard let conn else { return }
-        // Capture the connection and re-arm from a nonisolated static so the next receiveMessage
-        // is scheduled on `q` immediately. Retained Data then moves to the ordered processing
-        // queue; parsing here used to occupy the receive/ACK queue during a video burst.
+        guard let udpSocket else { return }
+        // The DispatchSource read handler drains the non-blocking socket to EAGAIN. Each retained
+        // datagram moves immediately to the ordered processing queue; parsing never runs here.
         let assembler = videoAssembler
         let arrivalJitterBuffer = nanoArrivalJitterBuffer
         let handshake = handshakeFlag
@@ -785,7 +748,7 @@ final class DatalinkDriver {
         let gate = videoGate
         let flipReplyAt = lastSelfieFlipReply
         let generation = udpGeneration
-        let socket = conn
+        let socket = udpSocket
         let processor = udpProcessor
         processor.activate(generation: generation)
         receiveArmed = true
@@ -876,67 +839,32 @@ final class DatalinkDriver {
                 self?.ingest(bytes)
             }
         }
-        Self.armReceive(
-            conn, queue: q,
-            onError: { [weak self] message in
-                let canceled = CameraSoftAP.isCanceledReceive(message)
+        udpSocket.start(
+            onDatagram: { data in
+                processor.submit(data, generation: generation, handler: processDatagram)
+            },
+            onError: { [weak self] error in
                 let awaitingAck = !handshake.withLock { $0 }
                 Task { @MainActor in
                     guard let self else { return }
-                    let live = self.udpGeneration == generation && self.conn === socket
+                    let live = self.udpGeneration == generation && self.udpSocket === socket
                     if awaitingAck {
                         self.log.info(
-                            "datalink: handshake UDP recv error canceled=\(canceled) live=\(live) (\(message, privacy: .public))"
+                            "datalink: handshake UDP recv error live=\(live) (\(error.localizedDescription, privacy: .public))"
                         )
                     }
                     guard
                         CameraSoftAP.shouldCountReceiveError(
-                            isLiveConnection: live, canceled: canceled)
+                            isLiveConnection: live, canceled: false)
                     else { return }
                     self.receiveErrors += 1
+                    self.writeHealthy = false
                     self.log.info(
-                        "datalink: UDP receive error #\(self.receiveErrors, privacy: .public) (\(message, privacy: .public)) — re-arm"
+                        "datalink: UDP receive error #\(self.receiveErrors, privacy: .public) (\(error.localizedDescription, privacy: .public))"
                     )
                 }
             }
-        ) { data in
-            processor.submit(data, generation: generation, handler: processDatagram)
-        }
-    }
-
-    /// First-connect path updates used to stop `receiveMessage` on the first
-    /// error — inbound video and command ACKs died while BLE stayed up.
-    nonisolated private static func armReceive(
-        _ conn: NWConnection,
-        queue: DispatchQueue,
-        onError: @escaping @Sendable (String) -> Void,
-        ingest: @escaping @Sendable (Data) -> Void
-    ) {
-        conn.receiveMessage { data, _, _, error in
-            // Re-arm BEFORE ingest. Ingest-first froze videoPkts at the first
-            // burst (272, rxErr=0) so the enable-triggered IDR never arrived.
-            if let error {
-                let canceled = CameraSoftAP.isCanceledReceive(error.localizedDescription)
-                onError(error.localizedDescription)
-                let live = Self.shouldRearmReceive(conn)
-                if CameraSoftAP.shouldRearmAfterError(isLiveConnection: live, canceled: canceled) {
-                    queue.asyncAfter(deadline: .now() + .milliseconds(40)) {
-                        guard Self.shouldRearmReceive(conn) else { return }
-                        armReceive(conn, queue: queue, onError: onError, ingest: ingest)
-                    }
-                }
-            } else {
-                armReceive(conn, queue: queue, onError: onError, ingest: ingest)
-            }
-            if let data, !data.isEmpty { ingest(data) }
-        }
-    }
-
-    nonisolated private static func shouldRearmReceive(_ conn: NWConnection) -> Bool {
-        switch conn.state {
-        case .cancelled, .failed: false
-        default: true
-        }
+        )
     }
 
     private func ingest(_ datagram: [UInt8]) {
@@ -1002,50 +930,41 @@ final class DatalinkDriver {
     // ---- socket helpers --------------------------------------------------------------------------
 
     private func openUDP() async throws {
-        let savedIP = cameraLocalIPv4
-        let savedIF = cameraInterface
-        var last: Error = DatalinkError.notReady
-        let modes: [(String, String?, NWInterface?)] = [
-            ("bound", savedIP, savedIF),
-            ("interface", nil, savedIF),
-            ("wifi-type", nil, nil),
-        ]
-        for (label, ip, iface) in modes {
-            cameraLocalIPv4 = ip
-            cameraInterface = iface
-            do {
-                try await openUDPOnce(label: label)
-                cameraLocalIPv4 = savedIP
-                cameraInterface = savedIF
-                return
-            } catch is CancellationError {
-                cameraLocalIPv4 = savedIP
-                cameraInterface = savedIF
-                throw CancellationError()
-            } catch {
-                last = error
-                discardUDP()
-                log.info(
-                    "datalink: UDP \(label, privacy: .public) failed (\(error.localizedDescription, privacy: .public))"
-                )
-            }
+        do {
+            try openUDPOnce()
+        } catch {
+            discardUDP()
+            log.info(
+                "datalink: BSD UDP open failed (\(error.localizedDescription, privacy: .public))")
+            throw error
         }
-        cameraLocalIPv4 = savedIP
-        cameraInterface = savedIF
-        throw last
     }
 
-    private func openUDPOnce(label: String) async throws {
-        let params = wifiUDP()
+    private func openUDPOnce() throws {
         let host = CameraSoftAP.host
-        conn = NWConnection(
-            host: NWEndpoint.Host(host), port: NWEndpoint.Port(rawValue: port)!, using: params)
+        let socket = try BSDUDPSocket(remoteHost: host, remotePort: port, queue: q)
+        udpSocket = socket
+        let belowTarget =
+            socket.actualReceiveBufferSize < BSDUDPSocket.minimumDesiredReceiveBufferSize
         log.info(
-            "datalink: UDP \(label, privacy: .public) \(host, privacy: .public):\(self.port) if=\(self.cameraInterface?.name ?? "-", privacy: .public) local=\(self.cameraLocalIPv4 ?? "-", privacy: .public)"
+            "datalink: BSD UDP \(host, privacy: .public):\(self.port) local=0.0.0.0:\(socket.localPort, privacy: .public) rcvbuf_requested=\(BSDUDPSocket.requestedReceiveBufferSize, privacy: .public) rcvbuf_actual=\(socket.actualReceiveBufferSize, privacy: .public) below_1MiB=\(belowTarget, privacy: .public)"
         )
-        try await start(conn!)
+        ControlLiveLog.line(
+            "datalink: bsd_udp=true local_port=\(socket.localPort) rcvbuf_requested=\(BSDUDPSocket.requestedReceiveBufferSize) rcvbuf_actual=\(socket.actualReceiveBufferSize) below_1MiB=\(belowTarget)")
+        if belowTarget {
+            log.error(
+                "datalink: SO_RCVBUF actual value is below 1 MiB (\(socket.actualReceiveBufferSize, privacy: .public))"
+            )
+        }
+        if let failure = socket.receiveBufferSetFailure {
+            log.error(
+                "datalink: SO_RCVBUF request failed; continuing with actual=\(socket.actualReceiveBufferSize, privacy: .public) (\(failure.localizedDescription, privacy: .public))"
+            )
+            ControlLiveLog.line(
+                "datalink: SO_RCVBUF set_failed=true actual=\(socket.actualReceiveBufferSize) error=\(failure.localizedDescription)"
+            )
+        }
         startReceiveLoop()
-        if let conn { installStateWatch(conn) }
     }
 
     private func refreshCameraPath() async throws {
@@ -1061,16 +980,11 @@ final class DatalinkDriver {
         )
     }
 
-    private func wifiUDP() -> NWParameters {
-        cameraParameters(NWParameters.udp)
-    }
-
     private func wifiTCP() -> NWParameters {
         cameraParameters(NWParameters.tcp)
     }
 
-    /// Bind to the SoftAP IPv4 / interface. `requiredInterfaceType = .wifi` alone
-    /// scopes the flow to `en0` (home Wi-Fi) and later writes fail.
+    /// Bind the TCP-7001 poke to the SoftAP IPv4 / interface.
     private func cameraParameters(_ p: NWParameters) -> NWParameters {
         p.prohibitedInterfaceTypes = [.cellular]
         p.allowLocalEndpointReuse = true
@@ -1104,34 +1018,6 @@ final class DatalinkDriver {
         }
         monitor.start(queue: q)
         pathMonitor = monitor
-    }
-
-    private func installStateWatch(_ c: NWConnection) {
-        let generation = udpGeneration
-        c.stateUpdateHandler = { [weak self] state in
-            Task { @MainActor in
-                guard let self else { return }
-                guard
-                    CameraSoftAP.shouldApplyStaleSocketHealth(
-                        isLiveConnection: self.udpGeneration == generation && self.conn === c
-                    )
-                else { return }
-                switch state {
-                case .failed(let error):
-                    self.writeHealthy = false
-                    self.log.info(
-                        "datalink: UDP failed (\(error.localizedDescription, privacy: .public))")
-                case .waiting(let error):
-                    self.writeHealthy = false
-                    self.log.info(
-                        "datalink: UDP waiting (\(error.localizedDescription, privacy: .public))")
-                case .cancelled:
-                    self.writeHealthy = false
-                default:
-                    break
-                }
-            }
-        }
     }
 
     private func start(_ c: NWConnection, timeout: TimeInterval = 5) async throws {

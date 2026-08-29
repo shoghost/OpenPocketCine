@@ -14,11 +14,11 @@ A freeze that keeps the last picture is a stall (`feed: freeze` when UDP is stil
 
 | Layer | Why it can die after minutes |
 |---|---|
-| **SoftAP UDP 9004** | Video is pktType `0x02` on the datalink. Network.framework can leave a dead `en0` flow (`cannot accept write requests`) after a path update. Control writes already rebuild + bind to `192.168.2.x`; a quiet **video** socket may look `.ready` while reads have stopped. Receive re-arm stops on the first `receiveMessage` error. |
+| **SoftAP UDP 9004** | Video is pktType `0x02` on the datalink. iOS uses connected non-blocking BSD UDP and drains each read event to `EAGAIN`; fatal read/send errors close that generation. A quiet **video** socket can still need a watchdog rebuild after a SoftAP path flap. |
 | **Camera subscribe / enable** | `0x09/0xa8` starts the stream **and** is the IDR request. No periodic keyframes. If the encoder stops pushing HEVC, nothing resumes until another enable. A 1 Hz enable loop blacks the feed (GOP clock reset). |
 | **Recover enable / VT race** | Same first-connect bug, mid-session: re-enable before VT/display is ready, or enqueue P-frames after the GOP reset, or `flushAndRemoveImage` / hide the layer before the next decoded picture. The operator then sees **black** instead of the last good frame. |
 | **VideoToolbox / display** | `kVTInvalidSessionErr` (`-12903`) or a wedged `AVSampleBufferDisplayLayer` (`requiresFlushToResumeDecoding`, `.failed`) can stop presenting while UDP still delivers AUs. A failed layer is already black. |
-| **iOS Wi-Fi power save** | SoftAP has no internet. After minutes, viability / idle policy can stall `NWConnection` even though `192.168.2.x` is still on the path. |
+| **iOS Wi-Fi power save** | SoftAP has no internet. After minutes, the camera route can still go quiet even though `192.168.2.x` remains assigned. |
 | **Main-thread / baker** | Less likely if a **clean** feed (assists off) also freezes. Receive is already re-armed off main; ingest still hops to MainActor per packet. |
 | **TCP 7001 vs UDP 9004** | TCP poke is kept open for the session (camera `0x21/0x06`). Video is **only** UDP 9004. One can stay up while the other dies — log `flow` vs `tcp=` vs `lastVideo` / `lastStatus`. |
 | **Un-ACKed pktType `0x03`** | Command replies share one window. Video ACK of `0x02` does not cover it. HUD from `0x01` and HEVC can look “Connected” while record/ISO/zoom/Flip GET stop. Watchdog `udpReceiveAlive` is true, so it will not rebuild. SET timeouts with `videoFresh` also leave the socket. A session-preserving UDP rebuild does not reset the camera’s `0x03` window — only echoing that seq (or a new handshake) does. |

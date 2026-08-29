@@ -36,9 +36,11 @@ remain disconnected from both active routes. Non-Nano live sources remain unbuff
 
 ## Threading
 
-UDP receive re-arms on the network queue before retained `Data` is handed to the user-initiated
-serial datalink processing queue, not after parse, assembly, or a main-actor hop. A busy HUD or
-video burst must not stop the socket callback.
+Nano UDP uses a connected, non-blocking BSD socket with a requested 2 MiB `SO_RCVBUF`. Its
+`DispatchSourceRead` handler drains every queued datagram to `EAGAIN`, then hands retained `Data`
+in receive order to the user-initiated serial datalink processing queue. Parse, assembly, decoder,
+logging, and main-actor work never run in the socket read loop. A busy HUD or video burst must not
+stop kernel-queue draining.
 
 Depacketize and scope accumulation stay off the UI thread. Compose/SwiftUI
 invalidates at the HUD budget, not per video packet.

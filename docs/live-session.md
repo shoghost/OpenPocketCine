@@ -7,8 +7,7 @@ Stall and recover policy lives in [`feed-watchdog.md`](feed-watchdog.md).
 
 One UDP flow: camera `192.168.2.1:9004` is the **remote** only.
 
-- iOS binds the camera DHCP IPv4 plus an **ephemeral local port**
-  (`NWParameters.requiredLocalEndpoint` port 0).
+- iOS binds public BSD UDP to `0.0.0.0:0`; the route to `192.168.2.1` selects the SoftAP Wi-Fi.
 - Android pins the process with `bindProcessToNetwork` and binds UDP `0.0.0.0:0`
   after `Network.bindSocket`.
 
@@ -66,18 +65,17 @@ left Waiting for live view up.
 
 ## Foreground / SoftAP flap
 
-iOS is the operator-proven datalink (`DatalinkDriver.swift`
-`requiredLocalEndpoint` = camera DHCP IPv4; `noteSceneBecameActive` →
-`recoverAfterForeground`). Android must match that 5-tuple and lifecycle, not
-reimplement the ladder in `LiveViewEnablePolicy`.
+iOS is the operator-proven datalink (`DatalinkDriver.swift`; connected BSD UDP
+`0.0.0.0:ephemeral → 192.168.2.1:9004`; `noteSceneBecameActive` →
+`recoverAfterForeground`). Android must match that 5-tuple and lifecycle, not reimplement the
+ladder in `LiveViewEnablePolicy`.
 
-The iOS `NWConnection.receiveMessage` callback re-arms the next receive before handing the retained
-`Data` to the user-initiated serial `opv.datalink.udp-processing` queue. Transport parsing and
-`SoftAPVideoAssembler` run on that queue in arrival order; a generation gate drains an in-flight
-datagram and rejects queued packets from a discarded socket before a replacement session starts.
-Network.framework does not expose a public per-connection file descriptor or `SO_RCVBUF` option, so
-the app does not use private API or replace the established 5-tuple with a BSD socket solely to tune
-the kernel receive buffer.
+The iOS connected BSD socket requests a 2 MiB `SO_RCVBUF`, logs the actual value returned by
+`getsockopt`, and uses `O_NONBLOCK` plus `DispatchSourceRead`. Each read event drains `recv` to
+`EAGAIN` before returning. Retained datagrams are submitted in receive order to the user-initiated
+serial `opv.datalink.udp-processing` queue; transport parsing and `SoftAPVideoAssembler` run there.
+A generation gate drains an in-flight datagram and rejects queued packets from a discarded socket
+before a replacement session starts. No private interface-binding API is used.
 
 Mid-session SoftAP `onLost` is a Network-object replace until the grace
 expires — do not `bindProcessToNetwork(null)` while `isProcessBound` still

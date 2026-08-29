@@ -5,7 +5,7 @@ enum DatalinkTransportPolicy {
     static let windowAckIntervalMilliseconds = 25
 }
 
-/// Ordered, non-blocking handoff from Network.framework's receive callback to datalink parsing.
+/// Ordered, non-blocking handoff from the BSD socket read loop to datalink parsing.
 /// Generation changes wait for an in-flight datagram and make every queued older datagram stale.
 final class UDPDatagramProcessor: @unchecked Sendable {
     typealias Handler = @Sendable (Data) -> Void
