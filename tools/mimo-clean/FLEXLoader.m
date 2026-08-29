@@ -1,5 +1,5 @@
-#import <FLEX/FLEX.h>
 #import <UIKit/UIKit.h>
+#import <objc/message.h>
 #import <objc/runtime.h>
 
 /// Phase 2 inspection loader only. This file does not hook or swizzle DJI classes.
@@ -87,8 +87,22 @@ static const void *MCFLEXGestureKey = &MCFLEXGestureKey;
 }
 
 - (void)toggleExplorer:(UITapGestureRecognizer *)gesture {
-    if (gesture.state == UIGestureRecognizerStateRecognized) {
-        [FLEXManager.sharedManager toggleExplorer];
+    if (gesture.state != UIGestureRecognizerStateRecognized) {
+        return;
+    }
+
+    Class managerClass = NSClassFromString(@"FLEXManager");
+    SEL sharedManagerSelector = NSSelectorFromString(@"sharedManager");
+    SEL toggleExplorerSelector = NSSelectorFromString(@"toggleExplorer");
+    if (managerClass == Nil || ![managerClass respondsToSelector:sharedManagerSelector]) {
+        return;
+    }
+
+    id (*sendObject)(id, SEL) = (id (*)(id, SEL))objc_msgSend;
+    void (*sendVoid)(id, SEL) = (void (*)(id, SEL))objc_msgSend;
+    id manager = sendObject((id)managerClass, sharedManagerSelector);
+    if (manager != nil && [manager respondsToSelector:toggleExplorerSelector]) {
+        sendVoid(manager, toggleExplorerSelector);
     }
 }
 
