@@ -1,4 +1,29 @@
 workflows:
+  mimo-flex-build:
+    name: DJI Mimo 2.6.1 FLEX inspection IPA
+    instance_type: mac_mini_m2
+    max_build_duration: 60
+    environment:
+      xcode: latest
+    scripts:
+      - name: Show Apple toolchain
+        script: |
+          set -euo pipefail
+          xcodebuild -version
+          clang --version
+          python3 --version
+
+      - name: Build and verify official DJI Mimo FLEX inspection IPA
+        script: |
+          set -euo pipefail
+          bash tools/mimo-clean/build-phase2-flex.sh
+
+    artifacts:
+      - tools/mimo-clean/artifacts/DJI_Mimo_2.6.1_FLEX.ipa
+      - tools/mimo-clean/artifacts/DJI_Mimo_2.6.1_FLEX.sha256.txt
+      - tools/mimo-clean/artifacts/phase2-build-report.txt
+      - /tmp/xcodebuild_logs/*.log
+
   ios-unsigned:
     name: OpenPocketCine iOS unsigned IPA
     instance_type: mac_mini_m2

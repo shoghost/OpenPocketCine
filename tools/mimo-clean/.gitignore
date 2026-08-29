@@ -1,0 +1,13 @@
+# Runtime downloads and generated vendor artifacts. Never commit DJI binaries or built dylibs.
+.work/
+artifacts/
+*.ipa
+*.app
+*.appex
+*.framework
+*.dylib
+*.mobileprovision
+*.provisionprofile
+*.p12
+*.cer
+*.key
