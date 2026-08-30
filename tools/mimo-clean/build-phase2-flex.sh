@@ -4,15 +4,15 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 WORK_DIR="$SCRIPT_DIR/.work"
 ARTIFACT_DIR="$SCRIPT_DIR/artifacts"
-REPORT="$ARTIFACT_DIR/phase2-build-report.txt"
+REPORT="$ARTIFACT_DIR/phase3-clean-build-report.txt"
 EXPECTED_IPA_SHA256="9794c384461a8f5fd761a515ac667ff518e2a7744815964746ae2ce200132c31"
 PINNED_MANIFEST_URL="https://service-adhoc.dji.com/ios/plist/0B64345F7EAA4DA9A7A2DFAE555E1462"
 OTA_PAGE_URL="https://service-adhoc.dji.com/ios/app/65af52b3-95b5-45b7-947e-1780cef4360b"
 USER_AGENT="Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 Version/17.0 Mobile/15E148 Safari/604.1"
 ORIGINAL_IPA="$WORK_DIR/DJI_Mimo_2.6.1_official_ota.ipa"
 NO_WATCH_IPA="$WORK_DIR/DJI_Mimo_2.6.1_noWatch.ipa"
-FINAL_IPA="$ARTIFACT_DIR/DJI_Mimo_2.6.1_FLEX.ipa"
-FINAL_SHA_FILE="$ARTIFACT_DIR/DJI_Mimo_2.6.1_FLEX.sha256.txt"
+FINAL_IPA="$ARTIFACT_DIR/DJI_Mimo_2.6.1_CleanTest.ipa"
+FINAL_SHA_FILE="$ARTIFACT_DIR/DJI_Mimo_2.6.1_CleanTest.sha256.txt"
 LOAD_PATH='@executable_path/Frameworks/FLEXLoader.dylib'
 
 case "$WORK_DIR" in
@@ -236,7 +236,7 @@ done <<< "$final_cryptids"
 python3 "$SCRIPT_DIR/verify_phase2_changes.py" verify "$SNAPSHOT" "$FINAL_APP" "$EXECUTABLE_NAME" | tee -a "$REPORT"
 /usr/bin/unzip -tq "$FINAL_IPA" >/dev/null
 FINAL_SHA="$(shasum -a 256 "$FINAL_IPA" | awk '{print $1}')"
-printf '%s  %s\n' "$FINAL_SHA" "DJI_Mimo_2.6.1_FLEX.ipa" > "$FINAL_SHA_FILE"
+printf '%s  %s\n' "$FINAL_SHA" "DJI_Mimo_2.6.1_CleanTest.ipa" > "$FINAL_SHA_FILE"
 
 log "zip_test=PASS"
 log "watch_directory=absent"
