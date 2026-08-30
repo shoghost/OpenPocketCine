@@ -1,4 +1,23 @@
 workflows:
+  mimo-clean-preflight:
+    name: DJI Mimo Clean UI preflight
+    instance_type: mac_mini_m2
+    max_build_duration: 30
+    environment:
+      xcode: latest
+    scripts:
+      - name: Compile and link Clean UI without downloading Mimo
+        script: |
+          set -euo pipefail
+          bash tools/mimo-clean/preflight-clean-ui-macos.sh
+    artifacts:
+      - tools/mimo-clean/artifacts/preflight/mimo-clean-preflight-report.txt
+      - tools/mimo-clean/artifacts/preflight/FLEXLoader.file.txt
+      - tools/mimo-clean/artifacts/preflight/FLEXLoader.otool-L.txt
+      - tools/mimo-clean/artifacts/preflight/FLEXLoader.nm-u.txt
+      - tools/mimo-clean/.work/flex-build/FLEXLoader.dylib
+      - /tmp/xcodebuild_logs/*.log
+
   mimo-flex-build:
     name: DJI Mimo 2.6.1 Clean UI IPA
     instance_type: mac_mini_m2

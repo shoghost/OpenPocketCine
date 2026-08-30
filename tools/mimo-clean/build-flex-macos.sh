@@ -69,6 +69,7 @@ xcrun --sdk iphoneos clang \
     -framework UIKit \
     -framework Foundation \
     -framework CoreGraphics \
+    -framework QuartzCore \
     -install_name '@rpath/FLEXLoader.dylib' \
     -Wl,-rpath,@loader_path \
     -o "$BUILD_DIR/FLEXLoader.dylib"
@@ -87,6 +88,10 @@ otool -L "$BUILD_DIR/FLEXLoader.dylib" | grep -F '@rpath/FLEX.framework/FLEX' >/
 }
 otool -L "$BUILD_DIR/FLEXLoader.dylib" | grep -F 'CoreGraphics.framework/CoreGraphics' >/dev/null || {
     echo "error: FLEXLoader does not link CoreGraphics.framework" >&2
+    exit 1
+}
+otool -L "$BUILD_DIR/FLEXLoader.dylib" | grep -F 'QuartzCore.framework/QuartzCore' >/dev/null || {
+    echo "error: FLEXLoader does not link QuartzCore.framework" >&2
     exit 1
 }
 

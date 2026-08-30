@@ -23,7 +23,12 @@ the artifact directory are ignored by Git.
 
 ## Codemagic
 
-Run the manual workflow named **DJI Mimo 2.6.1 Clean UI IPA** (`mimo-flex-build`). It emits:
+First run **DJI Mimo Clean UI preflight** (`mimo-clean-preflight`). It downloads and
+builds only the pinned public FLEX source, then compiles and links the real arm64
+iPhoneOS `FLEXLoader.dylib`; it never downloads, extracts, injects, or packages DJI
+Mimo. Run the full workflow only after this preflight passes.
+
+Then run the manual workflow named **DJI Mimo 2.6.1 Clean UI IPA** (`mimo-flex-build`). It emits:
 
 - `DJI_Mimo_2.6.1_CleanUI.ipa`
 - `DJI_Mimo_2.6.1_CleanUI.sha256.txt`
