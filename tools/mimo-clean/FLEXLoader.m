@@ -1,3 +1,5 @@
+#import "MimoCleanController.h"
+
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
 #import <objc/runtime.h>
@@ -14,7 +16,6 @@
 @implementation MCFLEXLoader
 
 static const void *MCFLEXGestureKey = &MCFLEXGestureKey;
-static const void *MCCleanGestureKey = &MCCleanGestureKey;
 
 + (instancetype)sharedLoader {
     static MCFLEXLoader *loader;
@@ -90,19 +91,6 @@ static const void *MCCleanGestureKey = &MCCleanGestureKey;
         objc_setAssociatedObject(window, MCFLEXGestureKey, gesture, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
 
-    if (objc_getAssociatedObject(window, MCCleanGestureKey) == nil) {
-        UITapGestureRecognizer *gesture = [[UITapGestureRecognizer alloc]
-            initWithTarget:self
-                    action:@selector(toggleCleanMode:)];
-        gesture.numberOfTapsRequired = 1;
-        gesture.numberOfTouchesRequired = 4;
-        gesture.cancelsTouchesInView = NO;
-        gesture.delaysTouchesBegan = NO;
-        gesture.delaysTouchesEnded = NO;
-        gesture.delegate = self;
-        [window addGestureRecognizer:gesture];
-        objc_setAssociatedObject(window, MCCleanGestureKey, gesture, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    }
 }
 
 - (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer
@@ -370,5 +358,6 @@ __attribute__((constructor)) static void MCFLEXLoaderInitialize(void) {
         MCFLEXLoader *loader = MCFLEXLoader.sharedLoader;
         (void)loader;
         [loader installGestureOnApplicationWindows];
+        [MCMimoCleanController.sharedController start];
     });
 }

@@ -4,7 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 WORK_DIR="${MIMO_CLEAN_WORK_DIR:-$SCRIPT_DIR/.work}"
 FLEX_DIR="$WORK_DIR/sources/FLEX"
-SOURCE_FILE="$SCRIPT_DIR/FLEXLoader.m"
+SOURCE_FILES=("$SCRIPT_DIR/FLEXLoader.m" "$SCRIPT_DIR/MimoCleanController.m")
 BUILD_DIR="$WORK_DIR/flex-build"
 DERIVED_DIR="$BUILD_DIR/DerivedData"
 FLEX_REPOSITORY="https://github.com/FLEXTool/FLEX.git"
@@ -16,7 +16,9 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
 fi
 command -v xcodebuild >/dev/null || { echo "error: xcodebuild not found" >&2; exit 1; }
 command -v xcrun >/dev/null || { echo "error: xcrun not found" >&2; exit 1; }
-[[ -f "$SOURCE_FILE" ]] || { echo "error: missing $SOURCE_FILE" >&2; exit 1; }
+for source_file in "${SOURCE_FILES[@]}"; do
+    [[ -f "$source_file" ]] || { echo "error: missing $source_file" >&2; exit 1; }
+done
 
 mkdir -p "$WORK_DIR/sources"
 if [[ ! -d "$FLEX_DIR/.git" ]]; then
@@ -61,7 +63,7 @@ xcrun --sdk iphoneos clang \
     -mios-version-min=14.0 \
     -fobjc-arc \
     -dynamiclib \
-    "$SOURCE_FILE" \
+    "${SOURCE_FILES[@]}" \
     -F "$BUILD_DIR" \
     -framework FLEX \
     -framework UIKit \
