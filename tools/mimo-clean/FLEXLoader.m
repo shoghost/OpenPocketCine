@@ -157,7 +157,7 @@ static const void *MCCleanGestureKey = &MCCleanGestureKey;
     if (presented != nil) {
         return presented;
     }
-    for (UIViewController *child in viewController.children) {
+    for (UIViewController *child in [viewController childViewControllers]) {
         UIViewController *match = [self findViewControllerNamed:className fromViewController:child];
         if (match != nil) {
             return match;
