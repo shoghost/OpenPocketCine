@@ -66,6 +66,7 @@ xcrun --sdk iphoneos clang \
     -framework FLEX \
     -framework UIKit \
     -framework Foundation \
+    -framework CoreGraphics \
     -install_name '@rpath/FLEXLoader.dylib' \
     -Wl,-rpath,@loader_path \
     -o "$BUILD_DIR/FLEXLoader.dylib"
@@ -80,6 +81,10 @@ xcrun --sdk iphoneos clang \
 }
 otool -L "$BUILD_DIR/FLEXLoader.dylib" | grep -F '@rpath/FLEX.framework/FLEX' >/dev/null || {
     echo "error: FLEXLoader does not link the built FLEX.framework" >&2
+    exit 1
+}
+otool -L "$BUILD_DIR/FLEXLoader.dylib" | grep -F 'CoreGraphics.framework/CoreGraphics' >/dev/null || {
+    echo "error: FLEXLoader does not link CoreGraphics.framework" >&2
     exit 1
 }
 
