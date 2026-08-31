@@ -25,7 +25,7 @@ static NSString *const MCUserHideClassesKey = @"MimoClean.UserHideClassNames.v1"
 @end
 
 @interface MCMimoCleanController () <UIGestureRecognizerDelegate>
-@property(nonatomic, strong) NSMapTable<UIView *, NSNumber *> *originalAlphas;
+@property(nonatomic, strong) NSMapTable<UIView *, NSNumber *> *originalHiddenStates;
 @property(nonatomic, strong) NSMapTable<UIView *, NSNumber *> *classifications;
 @property(nonatomic, strong) NSMutableSet<NSString *> *userHideClassNames;
 @property(nonatomic, strong) NSMutableSet<NSString *> *inspectedRuntimeClasses;
@@ -61,7 +61,7 @@ static NSString *const MCUserHideClassesKey = @"MimoClean.UserHideClassNames.v1"
 - (instancetype)init {
     self = [super init];
     if (self) {
-        _originalAlphas = [NSMapTable weakToStrongObjectsMapTable];
+        _originalHiddenStates = [NSMapTable weakToStrongObjectsMapTable];
         _classifications = [NSMapTable weakToStrongObjectsMapTable];
         _inspectedRuntimeClasses = [NSMutableSet set];
         NSArray<NSString *> *stored = [NSUserDefaults.standardUserDefaults arrayForKey:MCUserHideClassesKey];
@@ -293,7 +293,8 @@ static NSString *const MCUserHideClassesKey = @"MimoClean.UserHideClassNames.v1"
 - (void)cleanButtonTapped:(UIButton *)sender {
     (void)sender;
     if (self.suppressNextCleanTap) { self.suppressNextCleanTap = NO; return; }
-    [self applyCleanMode];
+    if (self.cleanModeEnabled) [self restoreAllShowingToast:NO];
+    else [self applyCleanMode];
 }
 
 - (void)cleanButtonLongPressed:(UILongPressGestureRecognizer *)gesture {
@@ -348,13 +349,28 @@ static NSString *const MCUserHideClassesKey = @"MimoClean.UserHideClassNames.v1"
            [self subtreeContainsLayerNamed:@"CAEAGLLayer" view:view] ||
            [self subtreeContainsViewClassNamed:@"DJIAC103PreviewView" view:view] ||
            [self subtreeContainsViewClassNamed:@"DJIAC103TopPresentView" view:view] ||
-           [self subtreeContainsViewClassNamed:@"DJICobraTouchView" view:view];
+           [self subtreeContainsViewClassNamed:@"DJICobraTouchView" view:view] ||
+           [self subtreeContainsViewClassNamed:@"UITransitionView" view:view];
 }
 
 - (BOOL)isUIKitControlBranch:(UIView *)view {
     return [view isKindOfClass:UIControl.class] || [view isKindOfClass:UILabel.class] ||
            [view isKindOfClass:UIImageView.class] || [view isKindOfClass:UISlider.class] ||
-           [view isKindOfClass:UICollectionView.class] || [view isKindOfClass:UITableView.class];
+           [view isKindOfClass:UIScrollView.class] || [view isKindOfClass:UICollectionView.class] ||
+           [view isKindOfClass:UITableView.class];
+}
+
+- (BOOL)viewMatchesKnownOperationAsset:(UIView *)view {
+    if (![view isKindOfClass:UIImageView.class]) return NO;
+    UIImageView *imageView = (UIImageView *)view;
+    NSString *description = [NSString stringWithFormat:@"%@ %@ %@", NSStringFromClass(view.class),
+        view.accessibilityIdentifier ?: @"", imageView.image.description ?: @""].lowercaseString;
+    NSArray<NSString *> *assetNames = @[@"idle_record_video_image", @"user_guide_fpv_icon",
+        @"hg200_bottombar_microphone", @"uisit_sound_volume_off", @"fpvplayback",
+        @"custom_mode_enter"];
+    for (NSString *assetName in assetNames)
+        if ([description containsString:assetName]) return YES;
+    return NO;
 }
 
 - (BOOL)classNameHasUIOnlyKeyword:(NSString *)className {
@@ -387,11 +403,15 @@ static NSString *const MCUserHideClassesKey = @"MimoClean.UserHideClassNames.v1"
     if (largeContainer) return MCCleanClassificationUnknown;
     if ([className isEqualToString:@"DJIAC103OSDView"] ||
         [className isEqualToString:@"DJILiveviewMirrorContainerView"] ||
-        [self isUIKitControlBranch:view] || [self classNameHasUIOnlyKeyword:className])
+        [self viewMatchesKnownOperationAsset:view] || [self isUIKitControlBranch:view] ||
+        [self classNameHasUIOnlyKeyword:className])
         return MCCleanClassificationHide;
     NSUInteger total = 0, controls = 0;
     [self subtreeStatsForView:view total:&total controls:&controls];
-    if (!largeContainer && total > 0 && controls > 0 && controls * 2 >= total)
+    BOOL compactOperationContainer = rootArea > 0.0 && viewArea / rootArea <= 0.35 &&
+                                     total <= 40 && controls > 0;
+    if (!largeContainer && total > 0 && controls > 0 &&
+        (controls * 2 >= total || compactOperationContainer))
         return MCCleanClassificationHide;
     return MCCleanClassificationUnknown;
 }
@@ -480,18 +500,18 @@ static NSString *const MCUserHideClassesKey = @"MimoClean.UserHideClassNames.v1"
 }
 
 - (void)recordAndSuppressView:(UIView *)view {
-    if ([self.originalAlphas objectForKey:view] == nil) [self.originalAlphas setObject:@(view.alpha) forKey:view];
-    view.alpha = 0.0;
+    if ([self.originalHiddenStates objectForKey:view] == nil)
+        [self.originalHiddenStates setObject:@(view.hidden) forKey:view];
+    view.hidden = YES;
 }
 
-- (void)applyClassifiedBranchesInView:(UIView *)view preview:(UIView *)preview {
+- (void)applyClassifiedBranchesInView:(UIView *)view {
     for (UIView *subview in view.subviews) {
         NSNumber *stored = [self.classifications objectForKey:subview];
         MCCleanClassification value = stored == nil ? MCCleanClassificationUnknown : stored.integerValue;
         if (value == MCCleanClassificationHide) [self recordAndSuppressView:subview];
-        else if (value == MCCleanClassificationUnknown ||
-                 (value == MCCleanClassificationKeep && [self view:subview containsView:preview]))
-            [self applyClassifiedBranchesInView:subview preview:preview];
+        else
+            [self applyClassifiedBranchesInView:subview];
     }
 }
 
@@ -505,10 +525,10 @@ static NSString *const MCUserHideClassesKey = @"MimoClean.UserHideClassNames.v1"
     self.cleanPreviewView = preview; self.cleanPreviewSuperview = preview.superview;
     self.cleanPreviewFrame = preview.frame; self.cleanPreviewBounds = preview.bounds;
     self.cleanPreviewTransform = preview.transform;
-    [self applyClassifiedBranchesInView:root preview:preview];
+    [self applyClassifiedBranchesInView:root];
     self.cleanModeEnabled = YES;
     [self startSafetyTimer];
-    self.cleanButton.alpha = 0.0; self.cleanButton.userInteractionEnabled = NO;
+    self.cleanButton.alpha = 1.0; self.cleanButton.userInteractionEnabled = YES;
     [self updateOverlayFramesForController:controller];
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(250 * NSEC_PER_MSEC)),
                    dispatch_get_main_queue(), ^{
@@ -534,12 +554,12 @@ static NSString *const MCUserHideClassesKey = @"MimoClean.UserHideClassNames.v1"
 
 - (void)restoreAllShowingToast:(BOOL)showToast {
     NSAssert(NSThread.isMainThread, @"MimoClean restore must run on the main thread");
-    NSEnumerator<UIView *> *enumerator = self.originalAlphas.keyEnumerator;
+    NSEnumerator<UIView *> *enumerator = self.originalHiddenStates.keyEnumerator;
     for (UIView *view = enumerator.nextObject; view != nil; view = enumerator.nextObject) {
-        NSNumber *alpha = [self.originalAlphas objectForKey:view];
-        if (alpha != nil) view.alpha = alpha.doubleValue;
+        NSNumber *hidden = [self.originalHiddenStates objectForKey:view];
+        if (hidden != nil) view.hidden = hidden.boolValue;
     }
-    [self.originalAlphas removeAllObjects];
+    [self.originalHiddenStates removeAllObjects];
     [self stopSafetyTimer];
     self.cleanModeEnabled = NO; self.cleanLiveViewController = nil;
     self.cleanPreviewView = nil; self.cleanRootView = nil;
