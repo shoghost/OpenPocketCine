@@ -1,7 +1,7 @@
 #import "MimoKickConfig.h"
 
 // Change this one value to the Kick channel slug used by the streaming HUD.
-NSString *const MCKickChannelName = @"REPLACE_WITH_KICK_CHANNEL";
+NSString *const MCKickChannelName = @"kerokero9";
 
 // Matches Moblin's current unauthenticated Kick/Pusher chat transport.
 NSString *const MCKickPusherURLString =

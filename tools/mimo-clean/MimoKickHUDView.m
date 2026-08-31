@@ -145,8 +145,14 @@
      previewFrameInRoot:(CGRect)previewFrame {
     NSAssert(NSThread.isMainThread, @"Kick HUD layout must run on the main thread");
     self.frame = bounds;
-    CGFloat left = CGRectGetMinX(bounds) + MAX(8.0, safeArea.left);
-    CGFloat top = CGRectGetMinY(bounds) + MAX(8.0, safeArea.top);
+    static const CGFloat MCKickHUDEdgePadding = 10.0;
+    static const CGFloat MCKickHUDCutoutInsetThreshold = 24.0;
+    CGFloat leftInset = safeArea.left >= MCKickHUDCutoutInsetThreshold
+                            ? safeArea.left : MCKickHUDEdgePadding;
+    CGFloat topInset = safeArea.top >= MCKickHUDCutoutInsetThreshold
+                           ? safeArea.top : MCKickHUDEdgePadding;
+    CGFloat left = CGRectGetMinX(bounds) + leftInset;
+    CGFloat top = CGRectGetMinY(bounds) + topInset;
     CGFloat blackBandWidth = MAX(0.0, CGRectGetMinX(previewFrame) - left);
     CGFloat statusWidth = MIN(220.0, MAX(130.0, blackBandWidth - 8.0));
     statusWidth = MIN(statusWidth, CGRectGetWidth(bounds) - left - 8.0);

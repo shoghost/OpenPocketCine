@@ -6,7 +6,6 @@
 #import <QuartzCore/QuartzCore.h>
 #import <UIKit/UIKit.h>
 #import <dispatch/dispatch.h>
-#import <math.h>
 
 typedef NS_ENUM(NSInteger, MCCleanClassification) {
     MCCleanClassificationKeep,
@@ -24,14 +23,9 @@ static NSString *const MCUserHideClassesKey = @"MimoClean.UserHideClassNames.v1"
 @property(nonatomic, weak) UIView *cleanPreviewView;
 @property(nonatomic, weak) UIView *cleanRootView;
 @property(nonatomic, weak) UIView *cleanPreviewSuperview;
-@property(nonatomic, weak) UIView *cleanPreviewLayoutView;
-@property(nonatomic, weak) UIView *cleanPreviewLayoutSuperview;
 @property(nonatomic, weak) UIViewController *cleanLiveViewController;
 @property(nonatomic, assign) CGRect cleanPreviewBounds;
 @property(nonatomic, assign) CGAffineTransform cleanPreviewTransform;
-@property(nonatomic, assign) CGRect cleanPreviewLayoutBounds;
-@property(nonatomic, assign) CGAffineTransform cleanPreviewLayoutTransform;
-@property(nonatomic, assign) CGPoint originalPreviewCenter;
 @property(nonatomic, assign) BOOL cleanModeEnabled;
 @property(nonatomic, assign) NSUInteger keepCount;
 @property(nonatomic, assign) NSUInteger hideCount;
@@ -135,14 +129,6 @@ static NSString *const MCUserHideClassesKey = @"MimoClean.UserHideClassNames.v1"
     return nil;
 }
 
-- (UIView *)ancestorNamed:(NSString *)className fromView:(UIView *)view root:(UIView *)root {
-    for (UIView *candidate = view; candidate != nil; candidate = candidate.superview) {
-        if ([NSStringFromClass(candidate.class) isEqualToString:className]) return candidate;
-        if (candidate == root) break;
-    }
-    return nil;
-}
-
 - (void)streamingLayoutTick:(NSTimer *)timer {
     (void)timer;
     NSAssert(NSThread.isMainThread, @"Mimo streaming layout must run on the main thread");
@@ -171,7 +157,6 @@ static NSString *const MCUserHideClassesKey = @"MimoClean.UserHideClassNames.v1"
         return;
     }
 
-    [self alignPreviewToRightEdge];
     [self updateKickOverlayForPreview:preview root:root];
 }
 
@@ -324,17 +309,10 @@ static NSString *const MCUserHideClassesKey = @"MimoClean.UserHideClassNames.v1"
     if (controller == nil || root == nil || preview == nil || ![self scanCurrentLiveViewSuppressingNothing:YES]) return;
     self.cleanLiveViewController = controller; self.cleanRootView = root;
     self.cleanPreviewView = preview; self.cleanPreviewSuperview = preview.superview;
-    UIView *layoutView = [self ancestorNamed:@"DJIAC103PreviewView" fromView:preview root:root] ?: preview;
-    self.cleanPreviewLayoutView = layoutView;
-    self.cleanPreviewLayoutSuperview = layoutView.superview;
     self.cleanPreviewBounds = preview.bounds;
     self.cleanPreviewTransform = preview.transform;
-    self.cleanPreviewLayoutBounds = layoutView.bounds;
-    self.cleanPreviewLayoutTransform = layoutView.transform;
-    self.originalPreviewCenter = layoutView.center;
     [self applyClassifiedBranchesInView:root];
     self.cleanModeEnabled = YES;
-    [self alignPreviewToRightEdge];
     [self updateKickOverlayForPreview:preview root:root];
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(250 * NSEC_PER_MSEC)),
                    dispatch_get_main_queue(), ^{
@@ -346,37 +324,16 @@ static NSString *const MCUserHideClassesKey = @"MimoClean.UserHideClassNames.v1"
 }
 
 - (BOOL)previewIsIntact:(UIView *)preview {
-    UIView *layoutView = self.cleanPreviewLayoutView;
     if (preview == nil || preview.window == nil || preview.superview != self.cleanPreviewSuperview ||
         ![preview isDescendantOfView:self.cleanRootView] || preview.alpha <= 0.0 || preview.hidden ||
         ![NSStringFromClass(preview.layer.class) isEqualToString:@"CAEAGLLayer"] ||
         !CGRectEqualToRect(preview.bounds, self.cleanPreviewBounds) ||
         !CGAffineTransformEqualToTransform(preview.transform, self.cleanPreviewTransform)) return NO;
-    if (layoutView == nil || layoutView.superview != self.cleanPreviewLayoutSuperview ||
-        !CGRectEqualToRect(layoutView.bounds, self.cleanPreviewLayoutBounds) ||
-        !CGAffineTransformEqualToTransform(layoutView.transform, self.cleanPreviewLayoutTransform)) return NO;
     for (UIView *ancestor = preview; ancestor != nil; ancestor = ancestor.superview) {
         if (ancestor.alpha <= 0.0 || ancestor.hidden) return NO;
         if (ancestor == self.cleanRootView) return YES;
     }
     return NO;
-}
-
-- (void)alignPreviewToRightEdge {
-    UIView *preview = self.cleanPreviewView;
-    UIView *root = self.cleanRootView;
-    UIView *layoutView = self.cleanPreviewLayoutView;
-    UIView *layoutSuperview = layoutView.superview;
-    if (preview == nil || root == nil || layoutView == nil || layoutSuperview == nil) return;
-    CGRect frameInRoot = [preview convertRect:preview.bounds toView:root];
-    CGFloat deltaX = CGRectGetMaxX(root.bounds) - CGRectGetMaxX(frameInRoot);
-    if (fabs(deltaX) < 0.5) return;
-
-    // Move the known DJI preview container as a unit so renderer/touch descendants stay aligned.
-    // Bounds, transform, CAEAGLLayer, aspect ratio and FOV are untouched.
-    CGPoint centerInRoot = [layoutSuperview convertPoint:layoutView.center toView:root];
-    centerInRoot.x += deltaX;
-    layoutView.center = [root convertPoint:centerInRoot toView:layoutSuperview];
 }
 
 - (void)updateKickOverlayForPreview:(UIView *)preview root:(UIView *)root {
@@ -421,13 +378,9 @@ static NSString *const MCUserHideClassesKey = @"MimoClean.UserHideClassNames.v1"
         if (hidden != nil) view.hidden = hidden.boolValue;
     }
     [self.originalHiddenStates removeAllObjects];
-    if (self.cleanPreviewLayoutView != nil && self.cleanPreviewLayoutSuperview != nil)
-        self.cleanPreviewLayoutView.center = self.originalPreviewCenter;
     self.cleanModeEnabled = NO; self.cleanLiveViewController = nil;
     self.cleanPreviewView = nil; self.cleanRootView = nil;
     self.cleanPreviewSuperview = nil;
-    self.cleanPreviewLayoutView = nil;
-    self.cleanPreviewLayoutSuperview = nil;
     self.overlayWindow.hidden = YES;
     if (showToast) NSLog(@"[MimoClean] Mimo UI restored");
 }

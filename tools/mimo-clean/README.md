@@ -2,7 +2,7 @@
 
 This directory prepares a temporary, unsigned DJI Mimo 2.6.1 streaming-layout IPA on Codemagic
 macOS. When the observed Nano Live View appears, Mimo controls are suppressed automatically, the
-original preview is moved to the right edge without resizing, and a touch-through Kick HUD is shown.
+original preview remains under Mimo's native layout, and a touch-through Kick HUD is shown.
 There is no Clean button, three-finger toggle, or FLEX Explorer gesture.
 
 Set the channel once in `MimoKickConfig.m` by replacing `REPLACE_WITH_KICK_CHANNEL` in
@@ -19,8 +19,8 @@ Set the channel once in `MimoKickConfig.m` by replacing `REPLACE_WITH_KICK_CHANN
 - Streaming mode preserves the `DJIGLImageViewCupertino`/`CAEAGLLayer` preview and its ancestor
   chain, classifies sibling branches as KEEP/HIDE/UNKNOWN, and suppresses only HIDE branches with
   reversible `UIView.hidden` changes.
-- The preview keeps its bounds, transform, layer, and render path; only its center is translated by
-  a runtime-computed horizontal delta so its visible frame reaches the right edge.
+- The preview frame and constraints remain under Mimo's control. The tweak does not change its
+  bounds, center, transform, layer, aspect ratio, or render path.
 - The Kick client mirrors Moblin's current unauthenticated Pusher subscriptions and event set:
   chat/reply, badges, native Kick emotes, subscriptions, gifted subscriptions, rewards, hosts,
   KICKs, message deletion, bans, and viewer status. Kick failures never call DJI code.
