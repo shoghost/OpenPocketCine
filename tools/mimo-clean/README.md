@@ -1,8 +1,13 @@
-# Mimo Clean Phase 3 Clean UI artifact
+# Mimo Clean streaming HUD artifact
 
-This directory builds a temporary, unsigned DJI Mimo 2.6.1 Clean UI IPA on Codemagic macOS.
-A three-finger single tap toggles the DJI Live View between normal and Clean UI. No Clean button,
-status label, control panel, or FLEX Explorer gesture is displayed.
+This directory prepares a temporary, unsigned DJI Mimo 2.6.1 streaming-layout IPA on Codemagic
+macOS. When the observed Nano Live View appears, Mimo controls are suppressed automatically, the
+original preview is moved to the right edge without resizing, and a touch-through Kick HUD is shown.
+There is no Clean button, three-finger toggle, or FLEX Explorer gesture.
+
+Set the channel once in `MimoKickConfig.m` by replacing `REPLACE_WITH_KICK_CHANNEL` in
+`MCKickChannelName`. Until configured, the camera remains operational and the HUD reports
+`KICK: SET CHANNEL`.
 
 ## Boundaries
 
@@ -11,9 +16,16 @@ status label, control panel, or FLEX Explorer gesture is displayed.
 - FLEX and `insert_dylib` are built from their pinned public source commits.
 - The loader uses the observed Live View and preview class names only for runtime hierarchy lookup.
   It contains no hooks, swizzling, networking, video, decoder, renderer, FPS, or PTS changes.
-- Clean Mode preserves the `DJIGLImageViewCupertino`/`CAEAGLLayer` preview and its ancestor chain,
-  classifies sibling branches as KEEP/HIDE/UNKNOWN, and suppresses only HIDE branches with
+- Streaming mode preserves the `DJIGLImageViewCupertino`/`CAEAGLLayer` preview and its ancestor
+  chain, classifies sibling branches as KEEP/HIDE/UNKNOWN, and suppresses only HIDE branches with
   reversible `UIView.hidden` changes.
+- The preview keeps its bounds, transform, layer, and render path; only its center is translated by
+  a runtime-computed horizontal delta so its visible frame reaches the right edge.
+- The Kick client mirrors Moblin's current unauthenticated Pusher subscriptions and event set:
+  chat/reply, badges, native Kick emotes, subscriptions, gifted subscriptions, rewards, hosts,
+  KICKs, message deletion, bans, and viewer status. Kick failures never call DJI code.
+- Kick WebSocket reconnects use bounded exponential backoff. Viewer/live status is polled every
+  30 seconds, allowing a channel that goes live after app launch to update without restarting Mimo.
 - The only existing app file modified after Watch removal is the main executable, which receives
   one `LC_LOAD_DYLIB` for `@executable_path/Frameworks/FLEXLoader.dylib`.
 - `PlugIns/DJIBackgroundDownloadExtension.appex` is preserved.
@@ -46,7 +58,7 @@ the no-Watch baseline. Keep `DJIBackgroundDownloadExtension.appex`; let Sideload
 rewrite nested bundle identifiers and sign the app, extension, every framework, and
 `FLEXLoader.dylib`. Do not enable plugin removal for the background extension.
 
-After installation, connect the Nano and open Live View. Three-finger single-tap enables Clean UI;
-the next three-finger single-tap restores every hidden DJI view to its original state. FLEX Explorer
-activation is disabled. Clean Mode never removes DJI views or changes the preview frame, bounds,
-transform, layer, decoder, renderer, or transport.
+After installation, connect the Nano and open Live View. The streaming layout is applied
+automatically and is restored internally when that Live View controller disappears. FLEX Explorer
+activation is disabled. The tweak never removes DJI views or changes the preview bounds, transform,
+layer, decoder, renderer, or transport.

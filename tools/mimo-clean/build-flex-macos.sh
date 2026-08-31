@@ -4,7 +4,14 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 WORK_DIR="${MIMO_CLEAN_WORK_DIR:-$SCRIPT_DIR/.work}"
 FLEX_DIR="$WORK_DIR/sources/FLEX"
-SOURCE_FILES=("$SCRIPT_DIR/FLEXLoader.m" "$SCRIPT_DIR/MimoCleanController.m")
+SOURCE_FILES=(
+    "$SCRIPT_DIR/MimoStreamingEntry.m"
+    "$SCRIPT_DIR/MimoCleanController.m"
+    "$SCRIPT_DIR/MimoKickConfig.m"
+    "$SCRIPT_DIR/MimoKickModels.m"
+    "$SCRIPT_DIR/MimoKickClient.m"
+    "$SCRIPT_DIR/MimoKickHUDView.m"
+)
 BUILD_DIR="$WORK_DIR/flex-build"
 DERIVED_DIR="$BUILD_DIR/DerivedData"
 FLEX_REPOSITORY="https://github.com/FLEXTool/FLEX.git"

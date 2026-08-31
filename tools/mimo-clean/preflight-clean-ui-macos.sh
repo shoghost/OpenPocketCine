@@ -7,7 +7,14 @@ WORK_DIR="${MIMO_CLEAN_WORK_DIR:-$SCRIPT_DIR/.work}"
 BUILD_DIR="$WORK_DIR/flex-build"
 REPORT_DIR="$SCRIPT_DIR/artifacts/preflight"
 REPORT="$REPORT_DIR/mimo-clean-preflight-report.txt"
-SOURCE_FILES=("$SCRIPT_DIR/FLEXLoader.m" "$SCRIPT_DIR/MimoCleanController.m")
+SOURCE_FILES=(
+    "$SCRIPT_DIR/MimoStreamingEntry.m"
+    "$SCRIPT_DIR/MimoCleanController.m"
+    "$SCRIPT_DIR/MimoKickConfig.m"
+    "$SCRIPT_DIR/MimoKickModels.m"
+    "$SCRIPT_DIR/MimoKickClient.m"
+    "$SCRIPT_DIR/MimoKickHUDView.m"
+)
 
 if [[ "$(uname -s)" != "Darwin" ]]; then
     echo "error: the Clean UI binary preflight requires macOS and the iPhoneOS SDK" >&2
@@ -34,8 +41,13 @@ if grep -nE 'removeFromSuperview|makeKeyAndVisible|\.children([^A-Za-z]|$)|viewC
     exit 1
 fi
 grep -F '[viewController childViewControllers]' "${SOURCE_FILES[@]}" >/dev/null
-grep -F 'action:@selector(toggleMimoClean:)' "$SCRIPT_DIR/FLEXLoader.m" >/dev/null
-if grep -F 'NSClassFromString(@"FLEXManager")' "$SCRIPT_DIR/FLEXLoader.m" >/dev/null; then
+grep -F '[MCMimoCleanController.sharedController start]' "$SCRIPT_DIR/MimoStreamingEntry.m" >/dev/null
+if awk '/__attribute__\(\(constructor\)\)/ { active = 1 } active { print }' \
+    "$SCRIPT_DIR/MimoStreamingEntry.m" | grep -E 'toggleMimoClean:|installGesture'; then
+    echo "error: legacy three-finger Clean/FLEX activation is in the active constructor path" >&2
+    exit 1
+fi
+if grep -F 'NSClassFromString(@"FLEXManager")' "$SCRIPT_DIR/MimoStreamingEntry.m" >/dev/null; then
     echo "error: FLEX Explorer activation remains in the production gesture path" >&2
     exit 1
 fi

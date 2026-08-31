@@ -1,10 +1,12 @@
 #import "MimoCleanController.h"
 
+#import "MimoKickClient.h"
+#import "MimoKickHUDView.h"
+
 #import <QuartzCore/QuartzCore.h>
 #import <UIKit/UIKit.h>
-#import <objc/message.h>
-#import <objc/runtime.h>
-#import <stdlib.h>
+#import <dispatch/dispatch.h>
+#import <math.h>
 
 typedef NS_ENUM(NSInteger, MCCleanClassification) {
     MCCleanClassificationKeep,
@@ -18,19 +20,26 @@ static NSString *const MCUserHideClassesKey = @"MimoClean.UserHideClassNames.v1"
 @property(nonatomic, strong) NSMapTable<UIView *, NSNumber *> *originalHiddenStates;
 @property(nonatomic, strong) NSMapTable<UIView *, NSNumber *> *classifications;
 @property(nonatomic, strong) NSMutableSet<NSString *> *userHideClassNames;
-@property(nonatomic, strong) NSMutableSet<NSString *> *inspectedRuntimeClasses;
-@property(nonatomic, strong) NSTimer *safetyTimer;
+@property(nonatomic, strong) NSTimer *monitorTimer;
 @property(nonatomic, weak) UIView *cleanPreviewView;
 @property(nonatomic, weak) UIView *cleanRootView;
 @property(nonatomic, weak) UIView *cleanPreviewSuperview;
+@property(nonatomic, weak) UIView *cleanPreviewLayoutView;
+@property(nonatomic, weak) UIView *cleanPreviewLayoutSuperview;
 @property(nonatomic, weak) UIViewController *cleanLiveViewController;
-@property(nonatomic, assign) CGRect cleanPreviewFrame;
 @property(nonatomic, assign) CGRect cleanPreviewBounds;
 @property(nonatomic, assign) CGAffineTransform cleanPreviewTransform;
+@property(nonatomic, assign) CGRect cleanPreviewLayoutBounds;
+@property(nonatomic, assign) CGAffineTransform cleanPreviewLayoutTransform;
+@property(nonatomic, assign) CGPoint originalPreviewCenter;
 @property(nonatomic, assign) BOOL cleanModeEnabled;
 @property(nonatomic, assign) NSUInteger keepCount;
 @property(nonatomic, assign) NSUInteger hideCount;
 @property(nonatomic, assign) NSUInteger unknownCount;
+@property(nonatomic, strong) MCKickClient *kickClient;
+@property(nonatomic, strong) MCKickHUDView *kickHUD;
+@property(nonatomic, strong) MCPassthroughWindow *overlayWindow;
+@property(nonatomic, strong) UIViewController *overlayViewController;
 @end
 
 @implementation MCMimoCleanController
@@ -47,21 +56,36 @@ static NSString *const MCUserHideClassesKey = @"MimoClean.UserHideClassNames.v1"
     if (self) {
         _originalHiddenStates = [NSMapTable weakToStrongObjectsMapTable];
         _classifications = [NSMapTable weakToStrongObjectsMapTable];
-        _inspectedRuntimeClasses = [NSMutableSet set];
         NSArray<NSString *> *stored = [NSUserDefaults.standardUserDefaults arrayForKey:MCUserHideClassesKey];
         _userHideClassNames = [NSMutableSet setWithArray:stored ?: @[]];
+        _kickClient = [MCKickClient new];
+        _kickHUD = [[MCKickHUDView alloc] initWithFrame:CGRectZero];
+        _kickClient.delegate = _kickHUD;
     }
     return self;
 }
 
 - (void)start {
     NSAssert(NSThread.isMainThread, @"MimoClean must start on the main thread");
+    if (self.monitorTimer != nil) return;
+    [self.kickClient start];
+    NSNotificationCenter *center = NSNotificationCenter.defaultCenter;
+    [center addObserver:self selector:@selector(applicationDidBecomeActive:)
+                   name:UIApplicationDidBecomeActiveNotification object:nil];
+    if (@available(iOS 13.0, *)) {
+        [center addObserver:self selector:@selector(applicationDidBecomeActive:)
+                       name:UISceneDidActivateNotification object:nil];
+    }
+    self.monitorTimer = [NSTimer timerWithTimeInterval:0.5 target:self
+                                              selector:@selector(streamingLayoutTick:)
+                                              userInfo:nil repeats:YES];
+    [NSRunLoop.mainRunLoop addTimer:self.monitorTimer forMode:NSRunLoopCommonModes];
+    [self streamingLayoutTick:self.monitorTimer];
 }
 
-- (void)toggleCleanMode {
-    NSAssert(NSThread.isMainThread, @"MimoClean toggle must run on the main thread");
-    if (self.cleanModeEnabled) [self restoreAllShowingToast:NO];
-    else [self applyCleanMode];
+- (void)applicationDidBecomeActive:(NSNotification *)notification {
+    (void)notification;
+    [self streamingLayoutTick:self.monitorTimer];
 }
 
 - (NSArray<UIWindow *> *)applicationWindows {
@@ -111,30 +135,44 @@ static NSString *const MCUserHideClassesKey = @"MimoClean.UserHideClassNames.v1"
     return nil;
 }
 
-- (void)startSafetyTimer {
-    if (self.safetyTimer != nil) return;
-    self.safetyTimer = [NSTimer timerWithTimeInterval:0.5 target:self
-                                             selector:@selector(safetyTick:)
-                                             userInfo:nil repeats:YES];
-    [NSRunLoop.mainRunLoop addTimer:self.safetyTimer forMode:NSRunLoopCommonModes];
+- (UIView *)ancestorNamed:(NSString *)className fromView:(UIView *)view root:(UIView *)root {
+    for (UIView *candidate = view; candidate != nil; candidate = candidate.superview) {
+        if ([NSStringFromClass(candidate.class) isEqualToString:className]) return candidate;
+        if (candidate == root) break;
+    }
+    return nil;
 }
 
-- (void)stopSafetyTimer {
-    [self.safetyTimer invalidate];
-    self.safetyTimer = nil;
-}
-
-- (void)safetyTick:(NSTimer *)timer {
+- (void)streamingLayoutTick:(NSTimer *)timer {
     (void)timer;
-    NSAssert(NSThread.isMainThread, @"MimoClean safety check must run on the main thread");
-    if (!self.cleanModeEnabled) {
-        [self stopSafetyTimer];
+    NSAssert(NSThread.isMainThread, @"Mimo streaming layout must run on the main thread");
+    UIViewController *controller = self.cleanModeEnabled ? self.cleanLiveViewController
+                                                         : [self liveViewController];
+    UIView *root = self.cleanModeEnabled ? self.cleanRootView : controller.view;
+    UIView *preview = self.cleanModeEnabled ? self.cleanPreviewView
+                                            : (root == nil ? nil : [self findPreviewInView:root]);
+    if (controller == nil || root == nil || preview == nil || preview.window == nil) {
+        if (self.cleanModeEnabled) [self restoreAllShowingToast:NO];
+        self.overlayWindow.hidden = YES;
         return;
     }
-    if (![self previewIsIntact:self.cleanPreviewView]) {
-        [self restoreAllShowingToast:NO];
-        NSLog(@"[MimoClean] Safety Restore");
+
+    BOOL changedLiveView = controller != self.cleanLiveViewController ||
+                           preview != self.cleanPreviewView;
+    if (changedLiveView) {
+        if (self.cleanModeEnabled) [self restoreAllShowingToast:NO];
+        [self applyCleanMode];
+        return;
     }
+
+    if (![self previewIsIntact:preview]) {
+        [self restoreAllShowingToast:NO];
+        NSLog(@"[MimoClean] safety restore: preview renderer changed unexpectedly");
+        return;
+    }
+
+    [self alignPreviewToRightEdge];
+    [self updateKickOverlayForPreview:preview root:root];
 }
 
 - (BOOL)view:(UIView *)view containsView:(UIView *)target {
@@ -238,69 +276,12 @@ static NSString *const MCUserHideClassesKey = @"MimoClean.UserHideClassNames.v1"
     return MCCleanClassificationUnknown;
 }
 
-- (NSString *)classificationName:(MCCleanClassification)value {
-    if (value == MCCleanClassificationKeep) return @"KEEP";
-    if (value == MCCleanClassificationHide) return @"HIDE";
-    return @"UNKNOWN";
-}
-
-- (NSString *)ancestorChainForView:(UIView *)view root:(UIView *)root {
-    NSMutableArray<NSString *> *parts = [NSMutableArray array];
-    for (UIView *current = view; current != nil; current = current.superview) {
-        [parts addObject:NSStringFromClass(current.class)];
-        if (current == root) break;
-    }
-    return [parts.reverseObjectEnumerator.allObjects componentsJoinedByString:@" > "];
-}
-
-- (NSArray<NSString *> *)runtimeNamesForClass:(Class)runtimeClass kind:(NSString *)kind {
-    NSMutableArray<NSString *> *names = [NSMutableArray array];
-    if ([kind isEqualToString:@"ivars"]) {
-        unsigned int count = 0; Ivar *items = class_copyIvarList(runtimeClass, &count);
-        for (unsigned int i = 0; i < count; i++)
-            [names addObject:[NSString stringWithFormat:@"%s:%s", ivar_getName(items[i]) ?: "",
-                              ivar_getTypeEncoding(items[i]) ?: ""]];
-        free(items);
-    } else if ([kind isEqualToString:@"properties"]) {
-        unsigned int count = 0; objc_property_t *items = class_copyPropertyList(runtimeClass, &count);
-        for (unsigned int i = 0; i < count; i++)
-            [names addObject:[NSString stringWithFormat:@"%s:%s", property_getName(items[i]) ?: "",
-                              property_getAttributes(items[i]) ?: ""]];
-        free(items);
-    } else {
-        unsigned int count = 0; Method *items = class_copyMethodList(runtimeClass, &count);
-        NSUInteger limit = MIN((NSUInteger)count, (NSUInteger)100);
-        for (NSUInteger i = 0; i < limit; i++) [names addObject:NSStringFromSelector(method_getName(items[i]))];
-        if (count > limit) [names addObject:[NSString stringWithFormat:@"... +%u selectors", count - (unsigned int)limit]];
-        free(items);
-    }
-    return names;
-}
-
-- (void)logRuntimeMetadataForClass:(Class)runtimeClass {
-    NSString *className = NSStringFromClass(runtimeClass);
-    if ([self.inspectedRuntimeClasses containsObject:className]) return;
-    [self.inspectedRuntimeClasses addObject:className];
-    const char *imageName = class_getImageName(runtimeClass);
-    NSLog(@"[MimoClean][runtime] class=%@ superclass=%@ image=%s ivars=%@ properties=%@ selectors=%@",
-          className, NSStringFromClass(class_getSuperclass(runtimeClass)), imageName ?: "",
-          [[self runtimeNamesForClass:runtimeClass kind:@"ivars"] componentsJoinedByString:@","],
-          [[self runtimeNamesForClass:runtimeClass kind:@"properties"] componentsJoinedByString:@","],
-          [[self runtimeNamesForClass:runtimeClass kind:@"selectors"] componentsJoinedByString:@","]);
-}
-
 - (void)scanView:(UIView *)view root:(UIView *)root preview:(UIView *)preview keepSet:(NSSet<UIView *> *)keepSet {
     MCCleanClassification value = [self classificationForView:view root:root preview:preview keepSet:keepSet];
     [self.classifications setObject:@(value) forKey:view];
     if (value == MCCleanClassificationKeep) self.keepCount++;
     else if (value == MCCleanClassificationHide) self.hideCount++;
     else self.unknownCount++;
-    [self logRuntimeMetadataForClass:view.class];
-    NSLog(@"[MimoClean][classify] result=%@ class=%@ superclass=%@ frame=%@ bounds=%@ alpha=%.3f hidden=%d layer=%@ subviews=%lu ancestors=%@",
-          [self classificationName:value], NSStringFromClass(view.class),
-          NSStringFromClass(class_getSuperclass(view.class)), NSStringFromCGRect(view.frame),
-          NSStringFromCGRect(view.bounds), view.alpha, view.hidden, NSStringFromClass(view.layer.class),
-          (unsigned long)view.subviews.count, [self ancestorChainForView:view root:root]);
     for (UIView *subview in view.subviews) [self scanView:subview root:root preview:preview keepSet:keepSet];
 }
 
@@ -316,8 +297,6 @@ static NSString *const MCUserHideClassesKey = @"MimoClean.UserHideClassNames.v1"
     self.keepCount = self.hideCount = self.unknownCount = 0;
     NSSet<UIView *> *keepSet = [self previewKeepSetFromView:preview root:root];
     [self scanView:root root:root preview:preview keepSet:keepSet];
-    NSLog(@"[MimoClean][summary] KEEP=%lu HIDE=%lu UNKNOWN=%lu", (unsigned long)self.keepCount,
-          (unsigned long)self.hideCount, (unsigned long)self.unknownCount);
     return YES;
 }
 
@@ -345,32 +324,93 @@ static NSString *const MCUserHideClassesKey = @"MimoClean.UserHideClassNames.v1"
     if (controller == nil || root == nil || preview == nil || ![self scanCurrentLiveViewSuppressingNothing:YES]) return;
     self.cleanLiveViewController = controller; self.cleanRootView = root;
     self.cleanPreviewView = preview; self.cleanPreviewSuperview = preview.superview;
-    self.cleanPreviewFrame = preview.frame; self.cleanPreviewBounds = preview.bounds;
+    UIView *layoutView = [self ancestorNamed:@"DJIAC103PreviewView" fromView:preview root:root] ?: preview;
+    self.cleanPreviewLayoutView = layoutView;
+    self.cleanPreviewLayoutSuperview = layoutView.superview;
+    self.cleanPreviewBounds = preview.bounds;
     self.cleanPreviewTransform = preview.transform;
+    self.cleanPreviewLayoutBounds = layoutView.bounds;
+    self.cleanPreviewLayoutTransform = layoutView.transform;
+    self.originalPreviewCenter = layoutView.center;
     [self applyClassifiedBranchesInView:root];
     self.cleanModeEnabled = YES;
-    [self startSafetyTimer];
+    [self alignPreviewToRightEdge];
+    [self updateKickOverlayForPreview:preview root:root];
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(250 * NSEC_PER_MSEC)),
                    dispatch_get_main_queue(), ^{
         if (self.cleanModeEnabled && ![self previewIsIntact:self.cleanPreviewView]) {
             [self restoreAllShowingToast:NO];
-            NSLog(@"[MimoClean] Safety Restore");
+            NSLog(@"[MimoClean] safety restore: preview renderer changed unexpectedly");
         }
     });
 }
 
 - (BOOL)previewIsIntact:(UIView *)preview {
+    UIView *layoutView = self.cleanPreviewLayoutView;
     if (preview == nil || preview.window == nil || preview.superview != self.cleanPreviewSuperview ||
         ![preview isDescendantOfView:self.cleanRootView] || preview.alpha <= 0.0 || preview.hidden ||
         ![NSStringFromClass(preview.layer.class) isEqualToString:@"CAEAGLLayer"] ||
-        !CGRectEqualToRect(preview.frame, self.cleanPreviewFrame) ||
         !CGRectEqualToRect(preview.bounds, self.cleanPreviewBounds) ||
         !CGAffineTransformEqualToTransform(preview.transform, self.cleanPreviewTransform)) return NO;
+    if (layoutView == nil || layoutView.superview != self.cleanPreviewLayoutSuperview ||
+        !CGRectEqualToRect(layoutView.bounds, self.cleanPreviewLayoutBounds) ||
+        !CGAffineTransformEqualToTransform(layoutView.transform, self.cleanPreviewLayoutTransform)) return NO;
     for (UIView *ancestor = preview; ancestor != nil; ancestor = ancestor.superview) {
         if (ancestor.alpha <= 0.0 || ancestor.hidden) return NO;
         if (ancestor == self.cleanRootView) return YES;
     }
     return NO;
+}
+
+- (void)alignPreviewToRightEdge {
+    UIView *preview = self.cleanPreviewView;
+    UIView *root = self.cleanRootView;
+    UIView *layoutView = self.cleanPreviewLayoutView;
+    UIView *layoutSuperview = layoutView.superview;
+    if (preview == nil || root == nil || layoutView == nil || layoutSuperview == nil) return;
+    CGRect frameInRoot = [preview convertRect:preview.bounds toView:root];
+    CGFloat deltaX = CGRectGetMaxX(root.bounds) - CGRectGetMaxX(frameInRoot);
+    if (fabs(deltaX) < 0.5) return;
+
+    // Move the known DJI preview container as a unit so renderer/touch descendants stay aligned.
+    // Bounds, transform, CAEAGLLayer, aspect ratio and FOV are untouched.
+    CGPoint centerInRoot = [layoutSuperview convertPoint:layoutView.center toView:root];
+    centerInRoot.x += deltaX;
+    layoutView.center = [root convertPoint:centerInRoot toView:layoutSuperview];
+}
+
+- (void)updateKickOverlayForPreview:(UIView *)preview root:(UIView *)root {
+    UIWindow *sourceWindow = root.window;
+    if (sourceWindow == nil) return;
+    if (@available(iOS 13.0, *)) {
+        UIWindowScene *scene = sourceWindow.windowScene;
+        if (scene == nil) return;
+        if (self.overlayWindow == nil || self.overlayWindow.windowScene != scene) {
+            self.overlayWindow.hidden = YES;
+            self.overlayViewController = [UIViewController new];
+            self.overlayViewController.view.backgroundColor = UIColor.clearColor;
+            self.overlayWindow = [[MCPassthroughWindow alloc] initWithWindowScene:scene];
+            self.overlayWindow.backgroundColor = UIColor.clearColor;
+            self.overlayWindow.windowLevel = UIWindowLevelStatusBar + 1.0;
+            self.overlayWindow.rootViewController = self.overlayViewController;
+            [self.overlayViewController.view addSubview:self.kickHUD];
+        }
+    } else if (self.overlayWindow == nil) {
+        self.overlayViewController = [UIViewController new];
+        self.overlayViewController.view.backgroundColor = UIColor.clearColor;
+        self.overlayWindow = [[MCPassthroughWindow alloc] initWithFrame:sourceWindow.bounds];
+        self.overlayWindow.backgroundColor = UIColor.clearColor;
+        self.overlayWindow.windowLevel = UIWindowLevelStatusBar + 1.0;
+        self.overlayWindow.rootViewController = self.overlayViewController;
+        [self.overlayViewController.view addSubview:self.kickHUD];
+    }
+    self.overlayWindow.frame = sourceWindow.bounds;
+    self.overlayViewController.view.frame = self.overlayWindow.bounds;
+    CGRect previewInWindow = [preview convertRect:preview.bounds toView:sourceWindow];
+    [self.kickHUD updateForBounds:self.overlayViewController.view.bounds
+                        safeArea:sourceWindow.safeAreaInsets
+              previewFrameInRoot:previewInWindow];
+    self.overlayWindow.hidden = NO;
 }
 
 - (void)restoreAllShowingToast:(BOOL)showToast {
@@ -381,10 +421,14 @@ static NSString *const MCUserHideClassesKey = @"MimoClean.UserHideClassNames.v1"
         if (hidden != nil) view.hidden = hidden.boolValue;
     }
     [self.originalHiddenStates removeAllObjects];
-    [self stopSafetyTimer];
+    if (self.cleanPreviewLayoutView != nil && self.cleanPreviewLayoutSuperview != nil)
+        self.cleanPreviewLayoutView.center = self.originalPreviewCenter;
     self.cleanModeEnabled = NO; self.cleanLiveViewController = nil;
     self.cleanPreviewView = nil; self.cleanRootView = nil;
     self.cleanPreviewSuperview = nil;
+    self.cleanPreviewLayoutView = nil;
+    self.cleanPreviewLayoutSuperview = nil;
+    self.overlayWindow.hidden = YES;
     if (showToast) NSLog(@"[MimoClean] Mimo UI restored");
 }
 
