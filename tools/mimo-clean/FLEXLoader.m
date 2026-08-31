@@ -1,16 +1,10 @@
 #import "MimoCleanController.h"
 
 #import <UIKit/UIKit.h>
-#import <objc/message.h>
 #import <objc/runtime.h>
 
 /// Phase 3 UI-only loader. This file does not hook or swizzle DJI classes.
 @interface MCFLEXLoader : NSObject <UIGestureRecognizerDelegate>
-@property(nonatomic, strong) NSMapTable<UIView *, NSNumber *> *originalAlphas;
-@property(nonatomic, weak) UIView *cleanPreviewView;
-@property(nonatomic, assign) CGRect cleanPreviewFrame;
-@property(nonatomic, assign) CGAffineTransform cleanPreviewTransform;
-@property(nonatomic, assign) BOOL cleanModeEnabled;
 @end
 
 @implementation MCFLEXLoader
@@ -29,7 +23,6 @@ static const void *MCFLEXGestureKey = &MCFLEXGestureKey;
 - (instancetype)init {
     self = [super init];
     if (self) {
-        _originalAlphas = [NSMapTable weakToStrongObjectsMapTable];
         NSNotificationCenter *center = NSNotificationCenter.defaultCenter;
         [center addObserver:self
                    selector:@selector(applicationBecameActive:)
@@ -48,9 +41,6 @@ static const void *MCFLEXGestureKey = &MCFLEXGestureKey;
 - (void)applicationBecameActive:(NSNotification *)notification {
     (void)notification;
     [self installGestureOnApplicationWindows];
-    if (self.cleanModeEnabled) {
-        [self applyCleanMode];
-    }
 }
 
 - (void)installGestureOnApplicationWindows {
@@ -80,7 +70,7 @@ static const void *MCFLEXGestureKey = &MCFLEXGestureKey;
     if (objc_getAssociatedObject(window, MCFLEXGestureKey) == nil) {
         UITapGestureRecognizer *gesture = [[UITapGestureRecognizer alloc]
             initWithTarget:self
-                    action:@selector(toggleExplorer:)];
+                    action:@selector(toggleMimoClean:)];
         gesture.numberOfTapsRequired = 1;
         gesture.numberOfTouchesRequired = 3;
         gesture.cancelsTouchesInView = NO;
@@ -100,26 +90,12 @@ static const void *MCFLEXGestureKey = &MCFLEXGestureKey;
     return YES;
 }
 
-- (void)toggleExplorer:(UITapGestureRecognizer *)gesture {
-    if (gesture.state != UIGestureRecognizerStateRecognized) {
-        return;
-    }
-
-    Class managerClass = NSClassFromString(@"FLEXManager");
-    SEL sharedManagerSelector = NSSelectorFromString(@"sharedManager");
-    SEL toggleExplorerSelector = NSSelectorFromString(@"toggleExplorer");
-    if (managerClass == Nil || ![managerClass respondsToSelector:sharedManagerSelector]) {
-        return;
-    }
-
-    id (*sendObject)(id, SEL) = (id (*)(id, SEL))objc_msgSend;
-    void (*sendVoid)(id, SEL) = (void (*)(id, SEL))objc_msgSend;
-    id manager = sendObject((id)managerClass, sharedManagerSelector);
-    if (manager != nil && [manager respondsToSelector:toggleExplorerSelector]) {
-        sendVoid(manager, toggleExplorerSelector);
-    }
+- (void)toggleMimoClean:(UITapGestureRecognizer *)gesture {
+    if (gesture.state == UIGestureRecognizerStateRecognized)
+        [MCMimoCleanController.sharedController toggleCleanMode];
 }
 
+#if 0 // Superseded Phase 3 prototype. Kept out of the production binary.
 - (void)toggleCleanMode:(UITapGestureRecognizer *)gesture {
     if (gesture.state != UIGestureRecognizerStateRecognized) {
         return;
@@ -350,6 +326,7 @@ static const void *MCFLEXGestureKey = &MCFLEXGestureKey;
     self.cleanPreviewView = nil;
     NSLog(@"[MimoClean] Clean Mode OFF: original alpha values restored");
 }
+#endif
 
 @end
 

@@ -14,27 +14,12 @@ typedef NS_ENUM(NSInteger, MCCleanClassification) {
 
 static NSString *const MCUserHideClassesKey = @"MimoClean.UserHideClassNames.v1";
 
-@interface MCCleanOverlayWindow : UIWindow
-@end
-
-@implementation MCCleanOverlayWindow
-- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
-    UIView *view = [super hitTest:point withEvent:event];
-    return view == self.rootViewController.view ? nil : view;
-}
-@end
-
-@interface MCMimoCleanController () <UIGestureRecognizerDelegate>
+@interface MCMimoCleanController ()
 @property(nonatomic, strong) NSMapTable<UIView *, NSNumber *> *originalHiddenStates;
 @property(nonatomic, strong) NSMapTable<UIView *, NSNumber *> *classifications;
 @property(nonatomic, strong) NSMutableSet<NSString *> *userHideClassNames;
 @property(nonatomic, strong) NSMutableSet<NSString *> *inspectedRuntimeClasses;
-@property(nonatomic, strong) NSTimer *housekeepingTimer;
 @property(nonatomic, strong) NSTimer *safetyTimer;
-@property(nonatomic, strong) MCCleanOverlayWindow *overlayWindow;
-@property(nonatomic, strong) UIButton *cleanButton;
-@property(nonatomic, strong) UILabel *toastLabel;
-@property(nonatomic, strong) NSArray<UIView *> *restoreGestureAreas;
 @property(nonatomic, weak) UIView *cleanPreviewView;
 @property(nonatomic, weak) UIView *cleanRootView;
 @property(nonatomic, weak) UIView *cleanPreviewSuperview;
@@ -43,7 +28,6 @@ static NSString *const MCUserHideClassesKey = @"MimoClean.UserHideClassNames.v1"
 @property(nonatomic, assign) CGRect cleanPreviewBounds;
 @property(nonatomic, assign) CGAffineTransform cleanPreviewTransform;
 @property(nonatomic, assign) BOOL cleanModeEnabled;
-@property(nonatomic, assign) BOOL suppressNextCleanTap;
 @property(nonatomic, assign) NSUInteger keepCount;
 @property(nonatomic, assign) NSUInteger hideCount;
 @property(nonatomic, assign) NSUInteger unknownCount;
@@ -72,24 +56,12 @@ static NSString *const MCUserHideClassesKey = @"MimoClean.UserHideClassNames.v1"
 
 - (void)start {
     NSAssert(NSThread.isMainThread, @"MimoClean must start on the main thread");
-    if (self.housekeepingTimer != nil) return;
-    NSNotificationCenter *center = NSNotificationCenter.defaultCenter;
-    [center addObserver:self selector:@selector(applicationBecameActive:)
-                   name:UIApplicationDidBecomeActiveNotification object:nil];
-    if (@available(iOS 13.0, *)) {
-        [center addObserver:self selector:@selector(applicationBecameActive:)
-                       name:UISceneDidActivateNotification object:nil];
-    }
-    self.housekeepingTimer = [NSTimer timerWithTimeInterval:0.5 target:self
-                                                   selector:@selector(housekeepingTick:)
-                                                   userInfo:nil repeats:YES];
-    [NSRunLoop.mainRunLoop addTimer:self.housekeepingTimer forMode:NSRunLoopCommonModes];
-    [self housekeepingTick:self.housekeepingTimer];
 }
 
-- (void)applicationBecameActive:(NSNotification *)notification {
-    (void)notification;
-    [self housekeepingTick:self.housekeepingTimer];
+- (void)toggleCleanMode {
+    NSAssert(NSThread.isMainThread, @"MimoClean toggle must run on the main thread");
+    if (self.cleanModeEnabled) [self restoreAllShowingToast:NO];
+    else [self applyCleanMode];
 }
 
 - (NSArray<UIWindow *> *)applicationWindows {
@@ -122,7 +94,6 @@ static NSString *const MCUserHideClassesKey = @"MimoClean.UserHideClassNames.v1"
 
 - (UIViewController *)liveViewController {
     for (UIWindow *window in self.applicationWindows.reverseObjectEnumerator) {
-        if (window == self.overlayWindow) continue;
         UIViewController *match = [self findViewControllerNamed:@"DJIHG2X0FPVViewController"
                                              fromViewController:window.rootViewController];
         if (match != nil) return match;
@@ -138,25 +109,6 @@ static NSString *const MCUserHideClassesKey = @"MimoClean.UserHideClassNames.v1"
         if (match != nil) return match;
     }
     return nil;
-}
-
-- (void)housekeepingTick:(NSTimer *)timer {
-    NSAssert(NSThread.isMainThread, @"MimoClean discovery must run on the main thread");
-    (void)timer;
-    UIViewController *liveController = self.cleanModeEnabled ? self.cleanLiveViewController
-                                                             : [self liveViewController];
-    if (liveController == nil || liveController.view.window == nil) {
-        if (self.cleanModeEnabled) [self restoreAllShowingToast:NO];
-        self.cleanButton.alpha = 0.0;
-        self.cleanButton.userInteractionEnabled = NO;
-        return;
-    }
-    [self ensureOverlayForHostWindow:liveController.view.window];
-    [self updateOverlayFramesForController:liveController];
-    if (!self.cleanModeEnabled) {
-        self.cleanButton.alpha = 1.0;
-        self.cleanButton.userInteractionEnabled = YES;
-    }
 }
 
 - (void)startSafetyTimer {
@@ -181,138 +133,8 @@ static NSString *const MCUserHideClassesKey = @"MimoClean.UserHideClassNames.v1"
     }
     if (![self previewIsIntact:self.cleanPreviewView]) {
         [self restoreAllShowingToast:NO];
-        [self showToast:@"MimoClean Safety Restore"];
+        NSLog(@"[MimoClean] Safety Restore");
     }
-}
-
-- (void)ensureOverlayForHostWindow:(UIWindow *)hostWindow {
-    NSAssert(NSThread.isMainThread, @"MimoClean overlay must be created on the main thread");
-    if (self.overlayWindow != nil && self.overlayWindow.windowScene == hostWindow.windowScene) return;
-    self.overlayWindow.hidden = YES;
-    self.toastLabel = nil;
-    MCCleanOverlayWindow *window;
-    if (@available(iOS 13.0, *)) {
-        window = [[MCCleanOverlayWindow alloc] initWithWindowScene:hostWindow.windowScene];
-    } else {
-        window = [[MCCleanOverlayWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
-    }
-    window.frame = hostWindow.bounds;
-    window.windowLevel = UIWindowLevelNormal + 1.0;
-    window.backgroundColor = UIColor.clearColor;
-    UIViewController *rootController = [UIViewController new];
-    rootController.view.backgroundColor = UIColor.clearColor;
-    window.rootViewController = rootController;
-    window.hidden = NO;
-    self.overlayWindow = window;
-
-    UITapGestureRecognizer *flexGesture = [[UITapGestureRecognizer alloc]
-        initWithTarget:self action:@selector(toggleExplorer:)];
-    flexGesture.numberOfTapsRequired = 1;
-    flexGesture.numberOfTouchesRequired = 3;
-    flexGesture.cancelsTouchesInView = NO;
-    flexGesture.delaysTouchesBegan = NO;
-    flexGesture.delaysTouchesEnded = NO;
-    flexGesture.delegate = self;
-    [window addGestureRecognizer:flexGesture];
-
-    UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
-    [button setTitle:@"CLEAN" forState:UIControlStateNormal];
-    button.titleLabel.font = [UIFont boldSystemFontOfSize:12.0];
-    [button setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
-    button.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.68];
-    button.layer.cornerRadius = 7.0;
-    button.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.45].CGColor;
-    button.layer.borderWidth = 0.5;
-    [button addTarget:self action:@selector(cleanButtonTapped:) forControlEvents:UIControlEventTouchUpInside];
-    UILongPressGestureRecognizer *longPress = [[UILongPressGestureRecognizer alloc]
-        initWithTarget:self action:@selector(cleanButtonLongPressed:)];
-    longPress.minimumPressDuration = 0.6;
-    [button addGestureRecognizer:longPress];
-    [rootController.view addSubview:button];
-    self.cleanButton = button;
-
-    NSMutableArray<UIView *> *areas = [NSMutableArray array];
-    for (NSUInteger index = 0; index < 2; index++) {
-        UIView *area = [UIView new];
-        area.backgroundColor = UIColor.clearColor;
-        UITapGestureRecognizer *doubleTap = [[UITapGestureRecognizer alloc]
-            initWithTarget:self action:@selector(blackBarRestoreTapped:)];
-        doubleTap.numberOfTouchesRequired = 2;
-        doubleTap.numberOfTapsRequired = 2;
-        doubleTap.cancelsTouchesInView = NO;
-        doubleTap.delegate = self;
-        [area addGestureRecognizer:doubleTap];
-        UILongPressGestureRecognizer *panelPress = [[UILongPressGestureRecognizer alloc]
-            initWithTarget:self action:@selector(blackBarLongPressed:)];
-        panelPress.numberOfTouchesRequired = 2;
-        panelPress.minimumPressDuration = 0.7;
-        panelPress.cancelsTouchesInView = NO;
-        panelPress.delegate = self;
-        [area addGestureRecognizer:panelPress];
-        [rootController.view addSubview:area];
-        [areas addObject:area];
-    }
-    self.restoreGestureAreas = areas;
-}
-
-- (void)updateOverlayFramesForController:(UIViewController *)controller {
-    NSAssert(NSThread.isMainThread, @"MimoClean overlay layout must run on the main thread");
-    UIView *overlayRoot = self.overlayWindow.rootViewController.view;
-    CGRect bounds = overlayRoot.bounds;
-    self.cleanButton.frame = CGRectMake(MAX(8.0, CGRectGetWidth(bounds) - 72.0), 12.0, 62.0, 32.0);
-    UIView *preview = self.cleanModeEnabled ? self.cleanPreviewView : [self findPreviewInView:controller.view];
-    CGRect previewOnScreen = preview == nil ? CGRectZero : [preview convertRect:preview.bounds toView:nil];
-    CGRect previewRect = preview == nil ? CGRectZero : [overlayRoot convertRect:previewOnScreen fromView:nil];
-    CGFloat topHeight = MAX(0.0, MIN(CGRectGetMinY(previewRect), CGRectGetHeight(bounds)));
-    CGFloat bottomY = MAX(0.0, MIN(CGRectGetMaxY(previewRect), CGRectGetHeight(bounds)));
-    if (self.restoreGestureAreas.count == 2) {
-        self.restoreGestureAreas[0].frame = CGRectMake(0.0, 0.0, CGRectGetWidth(bounds), topHeight);
-        self.restoreGestureAreas[1].frame = CGRectMake(0.0, bottomY, CGRectGetWidth(bounds),
-                                                       MAX(0.0, CGRectGetHeight(bounds) - bottomY));
-        for (UIView *area in self.restoreGestureAreas) area.userInteractionEnabled = self.cleanModeEnabled;
-    }
-}
-
-- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer
-        shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)otherGestureRecognizer {
-    (void)gestureRecognizer; (void)otherGestureRecognizer; return YES;
-}
-
-- (void)toggleExplorer:(UITapGestureRecognizer *)gesture {
-    if (gesture.state != UIGestureRecognizerStateRecognized) return;
-    Class managerClass = NSClassFromString(@"FLEXManager");
-    SEL sharedSelector = NSSelectorFromString(@"sharedManager");
-    SEL toggleSelector = NSSelectorFromString(@"toggleExplorer");
-    if (managerClass == Nil || ![managerClass respondsToSelector:sharedSelector]) return;
-    id (*sendObject)(id, SEL) = (id (*)(id, SEL))objc_msgSend;
-    void (*sendVoid)(id, SEL) = (void (*)(id, SEL))objc_msgSend;
-    id manager = sendObject((id)managerClass, sharedSelector);
-    if (manager != nil && [manager respondsToSelector:toggleSelector]) sendVoid(manager, toggleSelector);
-}
-
-- (void)cleanButtonTapped:(UIButton *)sender {
-    (void)sender;
-    if (self.suppressNextCleanTap) { self.suppressNextCleanTap = NO; return; }
-    if (self.cleanModeEnabled) [self restoreAllShowingToast:NO];
-    else [self applyCleanMode];
-}
-
-- (void)cleanButtonLongPressed:(UILongPressGestureRecognizer *)gesture {
-    if (gesture.state == UIGestureRecognizerStateBegan) {
-        self.suppressNextCleanTap = YES;
-        [self presentControlPanel];
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1 * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{ self.suppressNextCleanTap = NO; });
-    }
-}
-
-- (void)blackBarRestoreTapped:(UITapGestureRecognizer *)gesture {
-    if (gesture.state == UIGestureRecognizerStateRecognized && self.cleanModeEnabled)
-        [self restoreAllShowingToast:NO];
-}
-
-- (void)blackBarLongPressed:(UILongPressGestureRecognizer *)gesture {
-    if (gesture.state == UIGestureRecognizerStateBegan && self.cleanModeEnabled) [self presentControlPanel];
 }
 
 - (BOOL)view:(UIView *)view containsView:(UIView *)target {
@@ -487,7 +309,7 @@ static NSString *const MCUserHideClassesKey = @"MimoClean.UserHideClassNames.v1"
     UIView *root = controller.view;
     UIView *preview = root == nil ? nil : [self findPreviewInView:root];
     if (controller == nil || root == nil || preview == nil) {
-        if (showFailure) [self showToast:@"MimoClean: LiveView preview not found"];
+        if (showFailure) NSLog(@"[MimoClean] LiveView preview not found");
         return NO;
     }
     [self.classifications removeAllObjects];
@@ -528,12 +350,11 @@ static NSString *const MCUserHideClassesKey = @"MimoClean.UserHideClassNames.v1"
     [self applyClassifiedBranchesInView:root];
     self.cleanModeEnabled = YES;
     [self startSafetyTimer];
-    self.cleanButton.alpha = 1.0; self.cleanButton.userInteractionEnabled = YES;
-    [self updateOverlayFramesForController:controller];
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(250 * NSEC_PER_MSEC)),
                    dispatch_get_main_queue(), ^{
         if (self.cleanModeEnabled && ![self previewIsIntact:self.cleanPreviewView]) {
-            [self restoreAllShowingToast:NO]; [self showToast:@"MimoClean Safety Restore"];
+            [self restoreAllShowingToast:NO];
+            NSLog(@"[MimoClean] Safety Restore");
         }
     });
 }
@@ -563,128 +384,8 @@ static NSString *const MCUserHideClassesKey = @"MimoClean.UserHideClassNames.v1"
     [self stopSafetyTimer];
     self.cleanModeEnabled = NO; self.cleanLiveViewController = nil;
     self.cleanPreviewView = nil; self.cleanRootView = nil;
-    self.cleanPreviewSuperview = nil; self.cleanButton.alpha = 1.0;
-    self.cleanButton.userInteractionEnabled = YES;
-    for (UIView *area in self.restoreGestureAreas) area.userInteractionEnabled = NO;
-    if (showToast) [self showToast:@"Mimo UI restored"];
-}
-
-- (BOOL)viewIsEffectivelyVisible:(UIView *)view {
-    if (view.window == nil || CGRectIsEmpty(view.bounds)) return NO;
-    for (UIView *ancestor = view; ancestor != nil; ancestor = ancestor.superview)
-        if (ancestor.hidden || ancestor.alpha <= 0.01) return NO;
-    return YES;
-}
-
-- (NSArray<NSString *> *)classNamesForClassification:(MCCleanClassification)value onlyVisible:(BOOL)onlyVisible {
-    NSMutableSet<NSString *> *names = [NSMutableSet set];
-    NSEnumerator<UIView *> *enumerator = self.classifications.keyEnumerator;
-    for (UIView *view = enumerator.nextObject; view != nil; view = enumerator.nextObject) {
-        NSNumber *stored = [self.classifications objectForKey:view];
-        if (stored.integerValue == value && (!onlyVisible || [self viewIsEffectivelyVisible:view]))
-            [names addObject:NSStringFromClass(view.class)];
-    }
-    return [names.allObjects sortedArrayUsingSelector:@selector(localizedCaseInsensitiveCompare:)];
-}
-
-- (void)presentControlPanel {
-    [self scanCurrentLiveViewSuppressingNothing:NO];
-    NSString *message = [NSString stringWithFormat:@"KEEP: %lu\nHIDE: %lu\nUNKNOWN: %lu",
-                         (unsigned long)self.keepCount, (unsigned long)self.hideCount,
-                         (unsigned long)self.unknownCount];
-    UIAlertController *panel = [UIAlertController alertControllerWithTitle:@"MimoClean Control"
-                                                                    message:message
-                                                             preferredStyle:UIAlertControllerStyleActionSheet];
-    __weak typeof(self) weakSelf = self;
-    [panel addAction:[UIAlertAction actionWithTitle:@"Clean ON" style:UIAlertActionStyleDefault
-                                            handler:^(__unused UIAlertAction *a) { [weakSelf applyCleanMode]; }]];
-    [panel addAction:[UIAlertAction actionWithTitle:@"Restore All" style:UIAlertActionStyleDefault
-                                            handler:^(__unused UIAlertAction *a) { [weakSelf restoreAllShowingToast:YES]; }]];
-    [panel addAction:[UIAlertAction actionWithTitle:@"Re-scan UI" style:UIAlertActionStyleDefault
-                                            handler:^(__unused UIAlertAction *a) {
-        [weakSelf scanCurrentLiveViewSuppressingNothing:YES]; [weakSelf showToast:@"Mimo UI re-scanned"];
-    }]];
-    [panel addAction:[UIAlertAction actionWithTitle:@"Show Classification" style:UIAlertActionStyleDefault
-                                            handler:^(__unused UIAlertAction *a) { [weakSelf presentClassificationSummary]; }]];
-    [panel addAction:[UIAlertAction actionWithTitle:@"Inspect Remaining" style:UIAlertActionStyleDefault
-                                            handler:^(__unused UIAlertAction *a) { [weakSelf presentUnknownClassChooser]; }]];
-    [panel addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
-    [self presentOverlayAlert:panel];
-}
-
-- (void)presentClassificationSummary {
-    NSArray<NSString *> *keep = [self classNamesForClassification:MCCleanClassificationKeep onlyVisible:NO];
-    NSArray<NSString *> *hide = [self classNamesForClassification:MCCleanClassificationHide onlyVisible:NO];
-    NSArray<NSString *> *unknown = [self classNamesForClassification:MCCleanClassificationUnknown onlyVisible:NO];
-    NSString *(^sample)(NSArray<NSString *> *) = ^NSString *(NSArray<NSString *> *values) {
-        NSUInteger count = MIN(values.count, (NSUInteger)12);
-        return [[values subarrayWithRange:NSMakeRange(0, count)] componentsJoinedByString:@", "];
-    };
-    NSString *message = [NSString stringWithFormat:@"KEEP %lu\n%@\n\nHIDE %lu\n%@\n\nUNKNOWN %lu\n%@",
-                         (unsigned long)self.keepCount, sample(keep), (unsigned long)self.hideCount,
-                         sample(hide), (unsigned long)self.unknownCount, sample(unknown)];
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"MimoClean Classification"
-                                                                    message:message preferredStyle:UIAlertControllerStyleAlert];
-    [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleCancel handler:nil]];
-    [self presentOverlayAlert:alert];
-}
-
-- (void)presentUnknownClassChooser {
-    [self scanCurrentLiveViewSuppressingNothing:NO];
-    NSArray<NSString *> *classes = [self classNamesForClassification:MCCleanClassificationUnknown
-                                                          onlyVisible:self.cleanModeEnabled];
-    UIAlertController *chooser = [UIAlertController alertControllerWithTitle:@"Inspect Remaining"
-        message:@"Select a class to hide now and on future Clean ON operations. KEEP branches are excluded."
-        preferredStyle:UIAlertControllerStyleActionSheet];
-    __weak typeof(self) weakSelf = self;
-    NSUInteger limit = MIN(classes.count, (NSUInteger)24);
-    for (NSUInteger index = 0; index < limit; index++) {
-        NSString *className = classes[index];
-        [chooser addAction:[UIAlertAction actionWithTitle:className style:UIAlertActionStyleDefault
-                                                  handler:^(__unused UIAlertAction *a) {
-            [weakSelf.userHideClassNames addObject:className];
-            [NSUserDefaults.standardUserDefaults setObject:weakSelf.userHideClassNames.allObjects
-                                                    forKey:MCUserHideClassesKey];
-            if (weakSelf.cleanModeEnabled) [weakSelf applyCleanMode];
-            else [weakSelf showToast:[NSString stringWithFormat:@"Hide rule saved: %@", className]];
-        }]];
-    }
-    if (classes.count == 0) chooser.message = @"No visible UNKNOWN classes remain.";
-    else if (classes.count > limit)
-        chooser.message = [chooser.message stringByAppendingFormat:@"\nShowing first %lu of %lu classes.",
-                           (unsigned long)limit, (unsigned long)classes.count];
-    [chooser addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
-    [self presentOverlayAlert:chooser];
-}
-
-- (void)presentOverlayAlert:(UIAlertController *)alert {
-    UIViewController *root = self.overlayWindow.rootViewController;
-    if (root.presentedViewController != nil) [root dismissViewControllerAnimated:NO completion:nil];
-    if (alert.popoverPresentationController != nil) {
-        alert.popoverPresentationController.sourceView = self.cleanButton;
-        alert.popoverPresentationController.sourceRect = self.cleanButton.bounds;
-    }
-    [root presentViewController:alert animated:YES completion:nil];
-}
-
-- (void)showToast:(NSString *)text {
-    UIView *root = self.overlayWindow.rootViewController.view;
-    if (root == nil) return;
-    UILabel *label = self.toastLabel;
-    if (label == nil) {
-        label = [UILabel new];
-        self.toastLabel = label;
-        [root addSubview:label];
-    }
-    label.text = text; label.textColor = UIColor.whiteColor;
-    label.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.78];
-    label.font = [UIFont boldSystemFontOfSize:13.0]; label.textAlignment = NSTextAlignmentCenter;
-    label.numberOfLines = 2; label.layer.cornerRadius = 8.0; label.clipsToBounds = YES;
-    label.frame = CGRectMake(24.0, MAX(60.0, CGRectGetMidY(root.bounds) - 28.0),
-                             MAX(100.0, CGRectGetWidth(root.bounds) - 48.0), 56.0);
-    label.alpha = 1.0;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{ label.alpha = 0.0; });
+    self.cleanPreviewSuperview = nil;
+    if (showToast) NSLog(@"[MimoClean] Mimo UI restored");
 }
 
 @end

@@ -1,8 +1,8 @@
 # Mimo Clean Phase 3 Clean UI artifact
 
 This directory builds a temporary, unsigned DJI Mimo 2.6.1 Clean UI IPA on Codemagic macOS.
-It keeps the official FLEX explorer on a three-finger single tap and adds an independent `CLEAN`
-overlay control while the DJI Live View controller is visible.
+A three-finger single tap toggles the DJI Live View between normal and Clean UI. No Clean button,
+status label, control panel, or FLEX Explorer gesture is displayed.
 
 ## Boundaries
 
@@ -13,7 +13,7 @@ overlay control while the DJI Live View controller is visible.
   It contains no hooks, swizzling, networking, video, decoder, renderer, FPS, or PTS changes.
 - Clean Mode preserves the `DJIGLImageViewCupertino`/`CAEAGLLayer` preview and its ancestor chain,
   classifies sibling branches as KEEP/HIDE/UNKNOWN, and suppresses only HIDE branches with
-  reversible `UIView.alpha` changes.
+  reversible `UIView.hidden` changes.
 - The only existing app file modified after Watch removal is the main executable, which receives
   one `LC_LOAD_DYLIB` for `@executable_path/Frameworks/FLEXLoader.dylib`.
 - `PlugIns/DJIBackgroundDownloadExtension.appex` is preserved.
@@ -46,8 +46,7 @@ the no-Watch baseline. Keep `DJIBackgroundDownloadExtension.appex`; let Sideload
 rewrite nested bundle identifiers and sign the app, extension, every framework, and
 `FLEXLoader.dylib`. Do not enable plugin removal for the background extension.
 
-After installation, connect the Nano and open Live View. Tap `CLEAN` to enable Clean Mode, or long
-press it to open the control panel. While clean, two-finger double-tap either black bar to restore;
-two-finger long-press a black bar opens the control panel invisibly. Three-finger single-tap still
-toggles FLEX. Clean Mode never removes DJI views or changes the preview frame, bounds, transform,
-layer, decoder, renderer, or transport.
+After installation, connect the Nano and open Live View. Three-finger single-tap enables Clean UI;
+the next three-finger single-tap restores every hidden DJI view to its original state. FLEX Explorer
+activation is disabled. Clean Mode never removes DJI views or changes the preview frame, bounds,
+transform, layer, decoder, renderer, or transport.

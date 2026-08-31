@@ -34,7 +34,11 @@ if grep -nE 'removeFromSuperview|makeKeyAndVisible|\.children([^A-Za-z]|$)|viewC
     exit 1
 fi
 grep -F '[viewController childViewControllers]' "${SOURCE_FILES[@]}" >/dev/null
-grep -F 'NSClassFromString(@"FLEXManager")' "$SCRIPT_DIR/FLEXLoader.m" >/dev/null
+grep -F 'action:@selector(toggleMimoClean:)' "$SCRIPT_DIR/FLEXLoader.m" >/dev/null
+if grep -F 'NSClassFromString(@"FLEXManager")' "$SCRIPT_DIR/FLEXLoader.m" >/dev/null; then
+    echo "error: FLEX Explorer activation remains in the production gesture path" >&2
+    exit 1
+fi
 
 echo "[3/7] Build pinned FLEX and link the real arm64/iPhoneOS loader"
 bash "$SCRIPT_DIR/build-flex-macos.sh"
