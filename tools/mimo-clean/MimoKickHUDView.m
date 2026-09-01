@@ -2,7 +2,9 @@
 
 #import "MimoKickConfig.h"
 
+#import <QuartzCore/QuartzCore.h>
 #import <dispatch/dispatch.h>
+#import <math.h>
 
 @interface MCRemoteImageStore : NSObject
 @property(nonatomic, strong) NSCache<NSURL *, UIImage *> *cache;
@@ -64,14 +66,14 @@
     self = [super initWithStyle:style reuseIdentifier:reuseIdentifier];
     if (self) {
         self.backgroundColor = UIColor.clearColor;
+        self.contentView.backgroundColor = UIColor.clearColor;
         self.selectionStyle = UITableViewCellSelectionStyleNone;
         _messageLabel = [UILabel new];
         _messageLabel.translatesAutoresizingMaskIntoConstraints = NO;
         _messageLabel.numberOfLines = 0;
         _messageLabel.lineBreakMode = NSLineBreakByWordWrapping;
-        _messageLabel.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.42];
-        _messageLabel.layer.cornerRadius = 4.0;
-        _messageLabel.layer.masksToBounds = YES;
+        _messageLabel.backgroundColor = UIColor.clearColor;
+        _messageLabel.layer.masksToBounds = NO;
         [self.contentView addSubview:_messageLabel];
         [NSLayoutConstraint activateConstraints:@[
             [_messageLabel.leadingAnchor constraintEqualToAnchor:self.contentView.leadingAnchor],
@@ -86,13 +88,18 @@
 @end
 
 @interface MCKickHUDView () <UITableViewDataSource, UITableViewDelegate>
-@property(nonatomic, strong) UILabel *statusLabel;
+@property(nonatomic, strong) UIView *viewerBadgeView;
+@property(nonatomic, strong) UILabel *kickMarkLabel;
+@property(nonatomic, strong) UILabel *viewerLabel;
 @property(nonatomic, strong) UITableView *tableView;
+@property(nonatomic, strong) CAGradientLayer *chatFadeMask;
 @property(nonatomic, strong) NSMutableArray<MCKickMessage *> *messages;
 @property(nonatomic, assign) MCKickConnectionState connectionState;
+@property(nonatomic, assign) UIInterfaceOrientation lastLandscapeOrientation;
 @property(nonatomic, strong, nullable) NSNumber *viewerCount;
 @property(nonatomic, assign) BOOL streamLive;
 @property(nonatomic, copy, nullable) NSString *stateDetail;
+- (void)updateChatBottomInset;
 @end
 
 @implementation MCPassthroughWindow
@@ -113,59 +120,134 @@
         self.backgroundColor = UIColor.clearColor;
         self.userInteractionEnabled = NO;
         self.clipsToBounds = NO;
+        [UIDevice.currentDevice beginGeneratingDeviceOrientationNotifications];
         _messages = [NSMutableArray array];
         _connectionState = MCKickConnectionStateConnecting;
+        _lastLandscapeOrientation = UIInterfaceOrientationLandscapeRight;
 
-        _statusLabel = [UILabel new];
-        _statusLabel.font = [UIFont monospacedSystemFontOfSize:12.0 weight:UIFontWeightSemibold];
-        _statusLabel.textColor = UIColor.whiteColor;
-        _statusLabel.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.55];
-        _statusLabel.layer.cornerRadius = 4.0;
-        _statusLabel.layer.masksToBounds = YES;
-        _statusLabel.textAlignment = NSTextAlignmentCenter;
-        [self addSubview:_statusLabel];
+        _viewerBadgeView = [UIView new];
+        _viewerBadgeView.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.88];
+        _viewerBadgeView.layer.cornerRadius = 5.0;
+        _viewerBadgeView.layer.masksToBounds = YES;
+        [self addSubview:_viewerBadgeView];
+
+        _kickMarkLabel = [UILabel new];
+        _kickMarkLabel.backgroundColor = [UIColor colorWithRed:0.32 green:1.0 blue:0.20 alpha:1.0];
+        _kickMarkLabel.font = [UIFont systemFontOfSize:20.0 weight:UIFontWeightBlack];
+        _kickMarkLabel.textColor = UIColor.blackColor;
+        _kickMarkLabel.textAlignment = NSTextAlignmentCenter;
+        _kickMarkLabel.text = @"K";
+        [_viewerBadgeView addSubview:_kickMarkLabel];
+
+        _viewerLabel = [UILabel new];
+        _viewerLabel.font = [UIFont monospacedDigitSystemFontOfSize:17.0 weight:UIFontWeightBold];
+        _viewerLabel.textColor = UIColor.whiteColor;
+        _viewerLabel.textAlignment = NSTextAlignmentLeft;
+        [_viewerBadgeView addSubview:_viewerLabel];
 
         _tableView = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStylePlain];
         _tableView.backgroundColor = UIColor.clearColor;
         _tableView.separatorStyle = UITableViewCellSeparatorStyleNone;
         _tableView.showsVerticalScrollIndicator = NO;
         _tableView.userInteractionEnabled = NO;
+        _tableView.clipsToBounds = NO;
+        if (@available(iOS 11.0, *))
+            _tableView.contentInsetAdjustmentBehavior = UIScrollViewContentInsetAdjustmentNever;
         _tableView.estimatedRowHeight = 42.0;
         _tableView.rowHeight = UITableViewAutomaticDimension;
         _tableView.dataSource = self;
         _tableView.delegate = self;
         [_tableView registerClass:MCKickMessageCell.class forCellReuseIdentifier:@"KickMessage"];
         [self addSubview:_tableView];
+
+        _chatFadeMask = [CAGradientLayer layer];
+        _chatFadeMask.colors = @[(id)UIColor.clearColor.CGColor,
+                                 (id)[UIColor colorWithWhite:1.0 alpha:0.38].CGColor,
+                                 (id)UIColor.whiteColor.CGColor];
+        _chatFadeMask.locations = @[@0.0, @0.16, @0.32];
+        _chatFadeMask.startPoint = CGPointMake(0.5, 0.0);
+        _chatFadeMask.endPoint = CGPointMake(0.5, 1.0);
+        _tableView.layer.mask = _chatFadeMask;
         [self refreshStatusLabel];
     }
     return self;
 }
 
+- (UIInterfaceOrientation)preferredLandscapeOrientation {
+    UIDeviceOrientation deviceOrientation = UIDevice.currentDevice.orientation;
+    if (deviceOrientation == UIDeviceOrientationLandscapeLeft)
+        self.lastLandscapeOrientation = UIInterfaceOrientationLandscapeLeft;
+    else if (deviceOrientation == UIDeviceOrientationLandscapeRight)
+        self.lastLandscapeOrientation = UIInterfaceOrientationLandscapeRight;
+    return self.lastLandscapeOrientation;
+}
+
+- (void)applyLandscapeCanvasForBounds:(CGRect)bounds {
+    CGFloat width = CGRectGetWidth(bounds);
+    CGFloat height = CGRectGetHeight(bounds);
+    self.center = CGPointMake(CGRectGetMidX(bounds), CGRectGetMidY(bounds));
+    if (width >= height) {
+        self.transform = CGAffineTransformIdentity;
+        self.bounds = CGRectMake(0.0, 0.0, width, height);
+        return;
+    }
+
+    self.bounds = CGRectMake(0.0, 0.0, height, width);
+    UIInterfaceOrientation orientation = [self preferredLandscapeOrientation];
+    CGFloat angle = orientation == UIInterfaceOrientationLandscapeLeft ? M_PI_2 : -M_PI_2;
+    self.transform = CGAffineTransformMakeRotation(angle);
+}
+
+- (void)layoutViewerBadgeAtLeft:(CGFloat)left top:(CGFloat)top {
+    static const CGFloat badgeHeight = 30.0;
+    static const CGFloat markWidth = 30.0;
+    CGSize viewerSize = [self.viewerLabel sizeThatFits:CGSizeMake(180.0, badgeHeight)];
+    CGFloat badgeWidth = markWidth + MAX(40.0, ceil(viewerSize.width) + 14.0);
+    self.viewerBadgeView.frame = CGRectMake(left, top, badgeWidth, badgeHeight);
+    self.kickMarkLabel.frame = CGRectMake(0.0, 0.0, markWidth, badgeHeight);
+    self.viewerLabel.frame = CGRectMake(markWidth + 7.0, 0.0,
+                                        badgeWidth - markWidth - 9.0, badgeHeight);
+}
+
 - (void)updateForBounds:(CGRect)bounds safeArea:(UIEdgeInsets)safeArea
      previewFrameInRoot:(CGRect)previewFrame {
     NSAssert(NSThread.isMainThread, @"Kick HUD layout must run on the main thread");
-    self.frame = bounds;
+    (void)previewFrame;
+    [self applyLandscapeCanvasForBounds:bounds];
     static const CGFloat MCKickHUDEdgePadding = 10.0;
-    static const CGFloat MCKickHUDCutoutInsetThreshold = 24.0;
-    CGFloat leftInset = safeArea.left >= MCKickHUDCutoutInsetThreshold
-                            ? safeArea.left : MCKickHUDEdgePadding;
-    CGFloat topInset = safeArea.top >= MCKickHUDCutoutInsetThreshold
-                           ? safeArea.top : MCKickHUDEdgePadding;
-    CGFloat left = CGRectGetMinX(bounds) + leftInset;
-    CGFloat top = CGRectGetMinY(bounds) + topInset;
-    CGFloat blackBandWidth = MAX(0.0, CGRectGetMinX(previewFrame) - left);
-    CGFloat statusWidth = MIN(220.0, MAX(130.0, blackBandWidth - 8.0));
-    statusWidth = MIN(statusWidth, CGRectGetWidth(bounds) - left - 8.0);
-    self.statusLabel.frame = CGRectMake(left, top, statusWidth, 24.0);
+    CGFloat canvasWidth = CGRectGetWidth(self.bounds);
+    CGFloat canvasHeight = CGRectGetHeight(self.bounds);
+    CGFloat left = MCKickHUDEdgePadding;
+    CGFloat top = MCKickHUDEdgePadding;
+    CGFloat right = MCKickHUDEdgePadding;
+    CGFloat bottom = MCKickHUDEdgePadding;
+    if (CGRectGetWidth(bounds) >= CGRectGetHeight(bounds)) {
+        left = MAX(left, safeArea.left);
+        top = MAX(top, safeArea.top);
+        right = MAX(right, safeArea.right);
+        bottom = MAX(bottom, safeArea.bottom);
+    } else if ([self preferredLandscapeOrientation] == UIInterfaceOrientationLandscapeLeft) {
+        left = MAX(left, safeArea.top);
+        top = MAX(top, safeArea.right);
+        right = MAX(right, safeArea.bottom);
+        bottom = MAX(bottom, safeArea.left);
+    } else {
+        left = MAX(left, safeArea.bottom);
+        top = MAX(top, safeArea.left);
+        right = MAX(right, safeArea.top);
+        bottom = MAX(bottom, safeArea.right);
+    }
+    [self layoutViewerBadgeAtLeft:left top:top];
 
-    // The chat starts in the left black band but intentionally spans the screen. It is not
-    // clipped to the band, allowing long comments and inline emotes to extend over the preview.
-    CGFloat chatTop = CGRectGetMaxY(self.statusLabel.frame) + 5.0;
-    CGFloat rightInset = MAX(8.0, safeArea.right);
-    CGFloat bottomInset = MAX(8.0, safeArea.bottom);
-    self.tableView.frame = CGRectMake(left, chatTop,
-        MAX(1.0, CGRectGetWidth(bounds) - left - rightInset),
-        MAX(1.0, CGRectGetHeight(bounds) - chatTop - bottomInset));
+    // Chat is bottom-anchored on a canonical landscape canvas. It spans the canvas width,
+    // so long text can naturally continue from the black band over the preview.
+    CGFloat chatHeight = floor(canvasHeight * (2.0 / 3.0));
+    self.tableView.frame = CGRectMake(left,
+                                      canvasHeight - bottom - chatHeight,
+                                      MAX(1.0, canvasWidth - left - right),
+                                      MAX(1.0, chatHeight));
+    self.chatFadeMask.frame = self.tableView.bounds;
+    [self updateChatBottomInset];
 }
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
@@ -188,14 +270,20 @@
     UIFont *font = [UIFont systemFontOfSize:fontSize weight:UIFontWeightRegular];
     UIFont *bold = [UIFont systemFontOfSize:fontSize weight:UIFontWeightSemibold];
     NSMutableAttributedString *result = [NSMutableAttributedString new];
+    NSShadow *textShadow = [NSShadow new];
+    textShadow.shadowColor = [UIColor colorWithWhite:0.0 alpha:0.9];
+    textShadow.shadowOffset = CGSizeMake(0.0, 1.0);
+    textShadow.shadowBlurRadius = 2.0;
     NSDictionary *plainAttributes = @{NSFontAttributeName: font,
-                                      NSForegroundColorAttributeName: UIColor.whiteColor};
+                                      NSForegroundColorAttributeName: UIColor.whiteColor,
+                                      NSShadowAttributeName: textShadow};
     if (message.replyUsername.length > 0 || message.replyText.length > 0) {
         NSString *reply = [NSString stringWithFormat:@"↪ %@: %@\n",
             message.replyUsername ?: @"", message.replyText ?: @""];
         [result appendAttributedString:[[NSAttributedString alloc] initWithString:reply
             attributes:@{NSFontAttributeName: [UIFont systemFontOfSize:12.0],
-                         NSForegroundColorAttributeName: UIColor.lightGrayColor}]];
+                         NSForegroundColorAttributeName: UIColor.lightGrayColor,
+                         NSShadowAttributeName: textShadow}]];
     }
     for (NSURL *badgeURL in message.badgeURLs) {
         [result appendAttributedString:[self attachmentForURL:badgeURL height:fontSize * 1.2]];
@@ -205,12 +293,15 @@
         NSString *badge = [NSString stringWithFormat:@"[%@] ", label];
         [result appendAttributedString:[[NSAttributedString alloc] initWithString:badge
             attributes:@{NSFontAttributeName: [UIFont systemFontOfSize:10.0 weight:UIFontWeightBold],
-                         NSForegroundColorAttributeName: UIColor.systemGreenColor}]];
+                         NSForegroundColorAttributeName: UIColor.systemGreenColor,
+                         NSShadowAttributeName: textShadow}]];
     }
     UIColor *usernameColor = [self colorFromHex:message.userColorHex fallback:UIColor.systemGreenColor];
     [result appendAttributedString:[[NSAttributedString alloc]
         initWithString:[NSString stringWithFormat:@"%@: ", message.username]
-        attributes:@{NSFontAttributeName: bold, NSForegroundColorAttributeName: usernameColor}]];
+        attributes:@{NSFontAttributeName: bold,
+                     NSForegroundColorAttributeName: usernameColor,
+                     NSShadowAttributeName: textShadow}]];
     for (MCKickSegment *segment in message.segments) {
         if (segment.text != nil)
             [result appendAttributedString:[[NSAttributedString alloc] initWithString:segment.text
@@ -250,31 +341,41 @@
 
 - (void)scrollToLatestAnimated:(BOOL)animated {
     if (self.messages.count == 0) return;
+    [self updateChatBottomInset];
     NSIndexPath *last = [NSIndexPath indexPathForRow:(NSInteger)self.messages.count - 1 inSection:0];
     [self.tableView scrollToRowAtIndexPath:last atScrollPosition:UITableViewScrollPositionBottom
                                   animated:animated];
 }
 
+- (void)updateChatBottomInset {
+    [self.tableView layoutIfNeeded];
+    CGFloat topInset = MAX(0.0, CGRectGetHeight(self.tableView.bounds) -
+                                self.tableView.contentSize.height);
+    UIEdgeInsets inset = self.tableView.contentInset;
+    if (fabs(inset.top - topInset) < 0.5) return;
+    inset.top = topInset;
+    self.tableView.contentInset = inset;
+}
+
 - (void)refreshStatusLabel {
-    NSString *text = @"KICK CONNECTING";
-    UIColor *color = UIColor.systemYellowColor;
+    NSString *text = @"CONNECTING";
+    UIColor *markColor = [UIColor colorWithRed:0.32 green:1.0 blue:0.20 alpha:1.0];
     if (self.connectionState == MCKickConnectionStateConfigurationRequired) {
-        text = @"KICK: SET CHANNEL";
-        color = UIColor.systemOrangeColor;
+        text = @"SET CHANNEL";
+        markColor = UIColor.systemOrangeColor;
     } else if (self.connectionState == MCKickConnectionStateOffline) {
-        text = @"KICK OFFLINE";
-        color = UIColor.lightGrayColor;
+        text = @"OFFLINE";
+        markColor = UIColor.darkGrayColor;
     } else if (self.connectionState == MCKickConnectionStateError) {
-        text = @"KICK UNAVAILABLE";
-        color = UIColor.systemRedColor;
+        text = @"UNAVAILABLE";
+        markColor = UIColor.systemRedColor;
     } else if (self.connectionState == MCKickConnectionStateConnected) {
-        text = self.viewerCount == nil ? @"KICK LIVE" :
-            [NSString stringWithFormat:@"KICK LIVE • %@ 👁", self.viewerCount];
-        color = UIColor.systemGreenColor;
+        text = self.viewerCount == nil ? @"LIVE" : self.viewerCount.stringValue;
     }
-    self.statusLabel.text = text;
-    self.statusLabel.textColor = color;
-    self.statusLabel.accessibilityValue = self.stateDetail;
+    self.kickMarkLabel.backgroundColor = markColor;
+    self.viewerLabel.text = text;
+    self.viewerLabel.accessibilityValue = self.stateDetail;
+    [self setNeedsLayout];
 }
 
 - (void)kickClientDidChangeState:(MCKickConnectionState)state detail:(NSString *)detail {
@@ -313,6 +414,8 @@
     if (indexes.count > 0) {
         [self.messages removeObjectsAtIndexes:indexes];
         [self.tableView reloadData];
+        [self updateChatBottomInset];
+        [self scrollToLatestAnimated:NO];
     }
 }
 
@@ -325,6 +428,8 @@
     if (indexes.count > 0) {
         [self.messages removeObjectsAtIndexes:indexes];
         [self.tableView reloadData];
+        [self updateChatBottomInset];
+        [self scrollToLatestAnimated:NO];
     }
 }
 
