@@ -311,6 +311,8 @@ static UIInterfaceOrientationMask MCApplicationSupportedOrientations(
     }
 
     [self requestLandscapeForController:controller sourceWindow:preview.window];
+    // Kick HUD follows LiveView presence, independently of Clean UI suppression/restoration.
+    [self updateKickOverlayForPreview:preview root:root];
 
     BOOL changedLiveView = controller != self.cleanLiveViewController ||
                            preview != self.cleanPreviewView;
@@ -326,7 +328,6 @@ static UIInterfaceOrientationMask MCApplicationSupportedOrientations(
         return;
     }
 
-    [self updateKickOverlayForPreview:preview root:root];
 }
 
 - (BOOL)view:(UIView *)view containsView:(UIView *)target {
@@ -482,7 +483,6 @@ static UIInterfaceOrientationMask MCApplicationSupportedOrientations(
     self.cleanPreviewTransform = preview.transform;
     [self applyClassifiedBranchesInView:root];
     self.cleanModeEnabled = YES;
-    [self updateKickOverlayForPreview:preview root:root];
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(250 * NSEC_PER_MSEC)),
                    dispatch_get_main_queue(), ^{
         if (self.cleanModeEnabled && ![self previewIsIntact:self.cleanPreviewView]) {
@@ -554,7 +554,6 @@ static UIInterfaceOrientationMask MCApplicationSupportedOrientations(
     self.cleanModeEnabled = NO; self.cleanLiveViewController = nil;
     self.cleanPreviewView = nil; self.cleanRootView = nil;
     self.cleanPreviewSuperview = nil;
-    self.overlayWindow.hidden = YES;
     if (showToast) NSLog(@"[MimoClean] Mimo UI restored");
 }
 
