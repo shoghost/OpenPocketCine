@@ -120,7 +120,6 @@
         self.backgroundColor = UIColor.clearColor;
         self.userInteractionEnabled = NO;
         self.clipsToBounds = NO;
-        [UIDevice.currentDevice beginGeneratingDeviceOrientationNotifications];
         _messages = [NSMutableArray array];
         _connectionState = MCKickConnectionStateConnecting;
         _lastLandscapeOrientation = UIInterfaceOrientationLandscapeRight;
@@ -173,16 +172,16 @@
     return self;
 }
 
-- (UIInterfaceOrientation)preferredLandscapeOrientation {
-    UIDeviceOrientation deviceOrientation = UIDevice.currentDevice.orientation;
-    if (deviceOrientation == UIDeviceOrientationLandscapeLeft)
-        self.lastLandscapeOrientation = UIInterfaceOrientationLandscapeLeft;
-    else if (deviceOrientation == UIDeviceOrientationLandscapeRight)
-        self.lastLandscapeOrientation = UIInterfaceOrientationLandscapeRight;
+- (UIInterfaceOrientation)landscapeOrientationForInterfaceOrientation:
+    (UIInterfaceOrientation)interfaceOrientation {
+    if (interfaceOrientation == UIInterfaceOrientationLandscapeLeft ||
+        interfaceOrientation == UIInterfaceOrientationLandscapeRight)
+        self.lastLandscapeOrientation = interfaceOrientation;
     return self.lastLandscapeOrientation;
 }
 
-- (void)applyLandscapeCanvasForBounds:(CGRect)bounds {
+- (void)applyLandscapeCanvasForBounds:(CGRect)bounds
+                 interfaceOrientation:(UIInterfaceOrientation)interfaceOrientation {
     CGFloat width = CGRectGetWidth(bounds);
     CGFloat height = CGRectGetHeight(bounds);
     self.center = CGPointMake(CGRectGetMidX(bounds), CGRectGetMidY(bounds));
@@ -193,7 +192,8 @@
     }
 
     self.bounds = CGRectMake(0.0, 0.0, height, width);
-    UIInterfaceOrientation orientation = [self preferredLandscapeOrientation];
+    UIInterfaceOrientation orientation =
+        [self landscapeOrientationForInterfaceOrientation:interfaceOrientation];
     CGFloat angle = orientation == UIInterfaceOrientationLandscapeLeft ? M_PI_2 : -M_PI_2;
     self.transform = CGAffineTransformMakeRotation(angle);
 }
@@ -210,10 +210,11 @@
 }
 
 - (void)updateForBounds:(CGRect)bounds safeArea:(UIEdgeInsets)safeArea
-     previewFrameInRoot:(CGRect)previewFrame {
+     previewFrameInRoot:(CGRect)previewFrame
+    interfaceOrientation:(UIInterfaceOrientation)interfaceOrientation {
     NSAssert(NSThread.isMainThread, @"Kick HUD layout must run on the main thread");
     (void)previewFrame;
-    [self applyLandscapeCanvasForBounds:bounds];
+    [self applyLandscapeCanvasForBounds:bounds interfaceOrientation:interfaceOrientation];
     static const CGFloat MCKickHUDEdgePadding = 10.0;
     CGFloat canvasWidth = CGRectGetWidth(self.bounds);
     CGFloat canvasHeight = CGRectGetHeight(self.bounds);
@@ -226,7 +227,8 @@
         top = MAX(top, safeArea.top);
         right = MAX(right, safeArea.right);
         bottom = MAX(bottom, safeArea.bottom);
-    } else if ([self preferredLandscapeOrientation] == UIInterfaceOrientationLandscapeLeft) {
+    } else if ([self landscapeOrientationForInterfaceOrientation:interfaceOrientation] ==
+               UIInterfaceOrientationLandscapeLeft) {
         left = MAX(left, safeArea.top);
         top = MAX(top, safeArea.right);
         right = MAX(right, safeArea.bottom);

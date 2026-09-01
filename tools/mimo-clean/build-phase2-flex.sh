@@ -230,6 +230,18 @@ rm -rf "$NO_WATCH_APP/Watch"
     log "error=background extension was removed"
     exit 1
 }
+/usr/libexec/PlistBuddy -c 'Delete :UISupportedInterfaceOrientations' \
+    "$NO_WATCH_APP/Info.plist" 2>/dev/null || true
+/usr/libexec/PlistBuddy -c 'Add :UISupportedInterfaceOrientations array' \
+    "$NO_WATCH_APP/Info.plist"
+/usr/libexec/PlistBuddy -c 'Add :UISupportedInterfaceOrientations:0 string UIInterfaceOrientationPortrait' \
+    "$NO_WATCH_APP/Info.plist"
+/usr/libexec/PlistBuddy -c 'Add :UISupportedInterfaceOrientations:1 string UIInterfaceOrientationLandscapeLeft' \
+    "$NO_WATCH_APP/Info.plist"
+/usr/libexec/PlistBuddy -c 'Add :UISupportedInterfaceOrientations:2 string UIInterfaceOrientationLandscapeRight' \
+    "$NO_WATCH_APP/Info.plist"
+plutil -lint "$NO_WATCH_APP/Info.plist"
+log "phase=orientation_capability iphone_orientations=portrait,landscapeLeft,landscapeRight"
 (
     cd "$NO_WATCH_TREE"
     /usr/bin/zip -qry -y "$NO_WATCH_IPA" Payload
@@ -254,6 +266,16 @@ FINAL_APP="${final_apps[0]}"
 FINAL_MAIN="$FINAL_APP/$EXECUTABLE_NAME"
 
 [[ ! -d "$FINAL_APP/Watch" ]] || { log "error=Watch directory present in final IPA"; exit 1; }
+final_orientations="$(/usr/libexec/PlistBuddy -c 'Print :UISupportedInterfaceOrientations' \
+    "$FINAL_APP/Info.plist")"
+for orientation in UIInterfaceOrientationPortrait \
+                   UIInterfaceOrientationLandscapeLeft \
+                   UIInterfaceOrientationLandscapeRight; do
+    grep -F "$orientation" <<< "$final_orientations" >/dev/null || {
+        log "error=final Info.plist missing orientation $orientation"
+        exit 1
+    }
+done
 [[ -d "$FINAL_APP/PlugIns/DJIBackgroundDownloadExtension.appex" ]] || {
     log "error=background extension missing in final IPA"
     exit 1
@@ -278,6 +300,7 @@ printf '%s  %s\n' "$FINAL_SHA" "DJI_Mimo_2.6.1_CleanUI.ipa" > "$FINAL_SHA_FILE"
 
 log "zip_test=PASS"
 log "watch_directory=absent"
+log "iphone_landscape_capability=present"
 log "background_extension=present"
 log "flex_framework=present"
 log "flex_loader=present"

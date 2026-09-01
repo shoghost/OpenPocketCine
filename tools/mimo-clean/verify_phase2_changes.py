@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify that Phase 2 changed only Watch/, the main Mach-O, and FLEX additions."""
+"""Verify the intentional Watch, orientation, Mach-O, and FLEX changes."""
 
 from __future__ import annotations
 
@@ -55,7 +55,8 @@ def verify(snapshot_path: Path, app: Path, executable: str) -> None:
         if path != "Frameworks/FLEXLoader.dylib"
         and not path.startswith("Frameworks/FLEX.framework/")
     ]
-    invalid_changed = [path for path in changed if path != executable]
+    allowed_changed = {executable, "Info.plist"}
+    invalid_changed = [path for path in changed if path not in allowed_changed]
 
     errors: list[str] = []
     if invalid_removed:
@@ -67,7 +68,9 @@ def verify(snapshot_path: Path, app: Path, executable: str) -> None:
     if not removed or any(not path.startswith("Watch/") for path in removed):
         errors.append("Watch app removal was not cleanly observed")
     if executable not in changed:
-        errors.append("main executable was not the sole modified existing file")
+        errors.append("main executable modification was not observed")
+    if "Info.plist" not in changed:
+        errors.append("iPhone landscape capability update was not observed")
     if "Frameworks/FLEXLoader.dylib" not in added:
         errors.append("FLEXLoader.dylib was not added")
     if not any(path.startswith("Frameworks/FLEX.framework/") for path in added):

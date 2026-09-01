@@ -12,7 +12,8 @@ NS_ASSUME_NONNULL_BEGIN
 @interface MCKickHUDView : UIView <MCKickClientDelegate>
 - (void)updateForBounds:(CGRect)bounds
                safeArea:(UIEdgeInsets)safeArea
-     previewFrameInRoot:(CGRect)previewFrame;
+     previewFrameInRoot:(CGRect)previewFrame
+    interfaceOrientation:(UIInterfaceOrientation)interfaceOrientation;
 @end
 
 NS_ASSUME_NONNULL_END

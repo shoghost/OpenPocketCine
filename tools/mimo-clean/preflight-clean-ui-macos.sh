@@ -42,6 +42,14 @@ if grep -nE 'removeFromSuperview|makeKeyAndVisible|\.children([^A-Za-z]|$)|viewC
 fi
 grep -F '[viewController childViewControllers]' "${SOURCE_FILES[@]}" >/dev/null
 grep -F '[MCMimoCleanController.sharedController start]' "$SCRIPT_DIR/MimoStreamingEntry.m" >/dev/null
+grep -F 'requestGeometryUpdateWithPreferences:' "$SCRIPT_DIR/MimoCleanController.m" >/dev/null
+grep -F 'UIInterfaceOrientationMaskLandscape' "$SCRIPT_DIR/MimoCleanController.m" >/dev/null
+grep -F 'UIInterfaceOrientationLandscapeLeft' "$SCRIPT_DIR/build-phase2-flex.sh" >/dev/null
+grep -F 'UIInterfaceOrientationLandscapeRight' "$SCRIPT_DIR/build-phase2-flex.sh" >/dev/null
+if grep -F 'setValue:' "$SCRIPT_DIR/MimoCleanController.m" | grep -F 'orientation'; then
+    echo "error: private UIDevice orientation forcing is forbidden" >&2
+    exit 1
+fi
 if awk '/__attribute__\(\(constructor\)\)/ { active = 1 } active { print }' \
     "$SCRIPT_DIR/MimoStreamingEntry.m" | grep -E 'toggleMimoClean:|installGesture'; then
     echo "error: legacy three-finger Clean/FLEX activation is in the active constructor path" >&2
