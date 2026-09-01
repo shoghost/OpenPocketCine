@@ -55,6 +55,44 @@ download_manifest() {
         "$url"
 }
 
+download_official_ipa() {
+    local url="$1"
+    local output="$2"
+    local attempt=1
+    local max_attempts=6
+    local status=0
+    local existing_bytes=0
+
+    while (( attempt <= max_attempts )); do
+        if [[ -f "$output" ]]; then
+            existing_bytes="$(stat -f%z "$output")"
+        else
+            existing_bytes=0
+        fi
+        log "official_ipa_download_attempt=$attempt/$max_attempts resume_from_bytes=$existing_bytes"
+
+        if curl --fail --show-error --location --http1.1 \
+            --retry 5 --retry-all-errors --retry-delay 5 \
+            --connect-timeout 30 \
+            --continue-at - \
+            --output "$output" \
+            "$url"; then
+            log "official_ipa_download_complete=true attempts_used=$attempt final_bytes=$(stat -f%z "$output")"
+            return 0
+        else
+            status=$?
+        fi
+
+        log "official_ipa_download_attempt_failed=$attempt curl_status=$status partial_bytes=$(stat -f%z "$output" 2>/dev/null || echo 0)"
+        if (( attempt == max_attempts )); then
+            return "$status"
+        fi
+
+        sleep $(( attempt * 5 ))
+        (( attempt += 1 ))
+    done
+}
+
 manifest_is_valid() {
     python3 - "$1" <<'PY'
 import plistlib
@@ -142,7 +180,7 @@ PACKAGE_HOST="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))[
 log "manifest_url=$MANIFEST_URL"
 log "package_domain=$PACKAGE_HOST version=2.6.1 bundle_id=com.dji.djikino.ci"
 log "phase=download official_ipa=true"
-curl --fail --show-error --location --retry 3 --output "$ORIGINAL_IPA" "$PACKAGE_URL"
+download_official_ipa "$PACKAGE_URL" "$ORIGINAL_IPA"
 
 ORIGINAL_SHA="$(shasum -a 256 "$ORIGINAL_IPA" | awk '{print $1}')"
 log "official_ipa_size=$(stat -f%z "$ORIGINAL_IPA") official_ipa_sha256=$ORIGINAL_SHA"
