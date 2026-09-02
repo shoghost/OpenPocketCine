@@ -199,6 +199,8 @@ shopt -u nullglob
 ORIGINAL_APP="${original_apps[0]}"
 EXECUTABLE_NAME="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$ORIGINAL_APP/Info.plist")"
 MAIN_EXECUTABLE="$ORIGINAL_APP/$EXECUTABLE_NAME"
+original_orientations="$(/usr/libexec/PlistBuddy -c 'Print :UISupportedInterfaceOrientations' \
+    "$ORIGINAL_APP/Info.plist" 2>/dev/null || true)"
 [[ -f "$MAIN_EXECUTABLE" ]] || { log "error=main executable missing"; exit 1; }
 [[ -d "$ORIGINAL_APP/Watch" ]] || { log "error=expected Watch directory is missing"; exit 1; }
 [[ -d "$ORIGINAL_APP/PlugIns/DJIBackgroundDownloadExtension.appex" ]] || {
@@ -230,16 +232,16 @@ rm -rf "$NO_WATCH_APP/Watch"
     log "error=background extension was removed"
     exit 1
 }
-/usr/libexec/PlistBuddy -c 'Delete :UISupportedInterfaceOrientations' \
+/usr/libexec/PlistBuddy -c 'Delete :UIStatusBarHidden' \
     "$NO_WATCH_APP/Info.plist" 2>/dev/null || true
-/usr/libexec/PlistBuddy -c 'Add :UISupportedInterfaceOrientations array' \
+/usr/libexec/PlistBuddy -c 'Add :UIStatusBarHidden bool true' \
     "$NO_WATCH_APP/Info.plist"
-/usr/libexec/PlistBuddy -c 'Add :UISupportedInterfaceOrientations:0 string UIInterfaceOrientationLandscapeLeft' \
-    "$NO_WATCH_APP/Info.plist"
-/usr/libexec/PlistBuddy -c 'Add :UISupportedInterfaceOrientations:1 string UIInterfaceOrientationLandscapeRight' \
+/usr/libexec/PlistBuddy -c 'Delete :UIViewControllerBasedStatusBarAppearance' \
+    "$NO_WATCH_APP/Info.plist" 2>/dev/null || true
+/usr/libexec/PlistBuddy -c 'Add :UIViewControllerBasedStatusBarAppearance bool false' \
     "$NO_WATCH_APP/Info.plist"
 plutil -lint "$NO_WATCH_APP/Info.plist"
-log "phase=orientation iphone_orientations=landscapeLeft,landscapeRight"
+log "phase=ui status_bar_hidden=true view_controller_status_bar_appearance=false orientations=preserved"
 (
     cd "$NO_WATCH_TREE"
     /usr/bin/zip -qry -y "$NO_WATCH_IPA" Payload
@@ -265,21 +267,25 @@ FINAL_MAIN="$FINAL_APP/$EXECUTABLE_NAME"
 
 [[ ! -d "$FINAL_APP/Watch" ]] || { log "error=Watch directory present in final IPA"; exit 1; }
 final_orientations="$(/usr/libexec/PlistBuddy -c 'Print :UISupportedInterfaceOrientations' \
-    "$FINAL_APP/Info.plist")"
-for orientation in UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight; do
-    grep -F "$orientation" <<< "$final_orientations" >/dev/null || {
-        log "error=final Info.plist missing orientation $orientation"
-        exit 1
-    }
-done
-[[ "$(grep -c 'UIInterfaceOrientation' <<< "$final_orientations")" -eq 2 ]] || {
-    log "error=final Info.plist must contain exactly two iPhone orientations"
+    "$FINAL_APP/Info.plist" 2>/dev/null || true)"
+[[ "$final_orientations" == "$original_orientations" ]] || {
+    log "error=final iPhone orientations differ from the official IPA"
     exit 1
 }
-if grep -F 'UIInterfaceOrientationPortrait' <<< "$final_orientations" >/dev/null; then
-    log "error=final Info.plist unexpectedly supports portrait"
+status_bar_hidden="$(/usr/libexec/PlistBuddy -c 'Print :UIStatusBarHidden' \
+    "$FINAL_APP/Info.plist" | tr '[:upper:]' '[:lower:]')"
+view_controller_status_bar="$(/usr/libexec/PlistBuddy \
+    -c 'Print :UIViewControllerBasedStatusBarAppearance' \
+    "$FINAL_APP/Info.plist" | tr '[:upper:]' '[:lower:]')"
+[[ "$status_bar_hidden" == "true" ]] || {
+    log "error=final Info.plist does not hide the status bar"
     exit 1
-fi
+}
+[[ "$view_controller_status_bar" == "false" ]] || {
+    log "error=final Info.plist still delegates status bar visibility to view controllers"
+    exit 1
+}
+log "verified_status_bar_hidden=$status_bar_hidden orientations=preserved"
 [[ -d "$FINAL_APP/PlugIns/DJIBackgroundDownloadExtension.appex" ]] || {
     log "error=background extension missing in final IPA"
     exit 1

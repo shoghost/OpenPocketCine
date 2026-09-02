@@ -47,15 +47,14 @@ if grep -nE 'requestGeometryUpdateWithPreferences:|attemptRotationToDeviceOrient
     echo "error: Mimo orientation forcing must not be present" >&2
     exit 1
 fi
-grep -F "Add :UISupportedInterfaceOrientations:0 string UIInterfaceOrientationLandscapeLeft" \
-    "$SCRIPT_DIR/build-phase2-flex.sh" >/dev/null
-grep -F "Add :UISupportedInterfaceOrientations:1 string UIInterfaceOrientationLandscapeRight" \
-    "$SCRIPT_DIR/build-phase2-flex.sh" >/dev/null
-if grep -F "Add :UISupportedInterfaceOrientations" "$SCRIPT_DIR/build-phase2-flex.sh" | \
-    grep -F "UIInterfaceOrientationPortrait"; then
-    echo "error: iPhone portrait orientation must not be added" >&2
+if grep -E "(Add|Delete) :UISupportedInterfaceOrientations" \
+    "$SCRIPT_DIR/build-phase2-flex.sh"; then
+    echo "error: the official IPA orientation list must not be rewritten" >&2
     exit 1
 fi
+grep -F "Add :UIStatusBarHidden bool true" "$SCRIPT_DIR/build-phase2-flex.sh" >/dev/null
+grep -F "Add :UIViewControllerBasedStatusBarAppearance bool false" \
+    "$SCRIPT_DIR/build-phase2-flex.sh" >/dev/null
 if grep -F 'setValue:' "$SCRIPT_DIR/MimoCleanController.m" | grep -F 'orientation'; then
     echo "error: private UIDevice orientation forcing is forbidden" >&2
     exit 1

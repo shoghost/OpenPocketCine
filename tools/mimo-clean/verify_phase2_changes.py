@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify the intentional Watch, orientation, Mach-O, and FLEX changes."""
+"""Verify the intentional Watch, status-bar, Mach-O, and FLEX changes."""
 
 from __future__ import annotations
 
@@ -70,7 +70,7 @@ def verify(snapshot_path: Path, app: Path, executable: str) -> None:
     if executable not in changed:
         errors.append("main executable modification was not observed")
     if "Info.plist" not in changed:
-        errors.append("iPhone landscape-only capability update was not observed")
+        errors.append("global status-bar visibility update was not observed")
     if "Frameworks/FLEXLoader.dylib" not in added:
         errors.append("FLEXLoader.dylib was not added")
     if not any(path.startswith("Frameworks/FLEX.framework/") for path in added):

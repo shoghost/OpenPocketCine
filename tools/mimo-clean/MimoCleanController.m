@@ -17,6 +17,13 @@ typedef NS_ENUM(NSInteger, MCCleanClassification) {
 static NSString *const MCUserHideClassesKey = @"MimoClean.UserHideClassNames.v1";
 
 static const void *MCStreamingGestureKey = &MCStreamingGestureKey;
+static Class MCSystemChromeSuppressedLiveViewClass;
+
+static BOOL MCLiveViewPrefersSystemChromeHidden(id object, SEL selector) {
+    (void)object;
+    (void)selector;
+    return YES;
+}
 
 @interface MCKickOverlayViewController : UIViewController
 @property(nonatomic, weak) UIViewController *orientationSourceViewController;
@@ -167,6 +174,28 @@ static const void *MCStreamingGestureKey = &MCStreamingGestureKey;
     return nil;
 }
 
+- (void)suppressSystemChromeForLiveViewController:(UIViewController *)controller {
+    if (controller == nil) return;
+    Class controllerClass = controller.class;
+    if (MCSystemChromeSuppressedLiveViewClass != controllerClass) {
+        SEL selectors[] = {@selector(prefersStatusBarHidden),
+                           @selector(prefersHomeIndicatorAutoHidden)};
+        for (NSUInteger index = 0; index < sizeof(selectors) / sizeof(selectors[0]); index++) {
+            SEL selector = selectors[index];
+            Method inheritedMethod = class_getInstanceMethod(controllerClass, selector);
+            const char *types = inheritedMethod == NULL ? "B@:" : method_getTypeEncoding(inheritedMethod);
+            if (!class_addMethod(controllerClass, selector,
+                                 (IMP)MCLiveViewPrefersSystemChromeHidden, types)) {
+                Method ownMethod = class_getInstanceMethod(controllerClass, selector);
+                method_setImplementation(ownMethod, (IMP)MCLiveViewPrefersSystemChromeHidden);
+            }
+        }
+        MCSystemChromeSuppressedLiveViewClass = controllerClass;
+    }
+    [controller setNeedsStatusBarAppearanceUpdate];
+    [controller setNeedsUpdateOfHomeIndicatorAutoHidden];
+}
+
 - (void)installStreamingGestureOnWindow:(UIWindow *)window {
     if (window == nil || objc_getAssociatedObject(window, MCStreamingGestureKey) != nil) return;
     UITapGestureRecognizer *gesture = [[UITapGestureRecognizer alloc]
@@ -245,6 +274,7 @@ static const void *MCStreamingGestureKey = &MCStreamingGestureKey;
         return;
     }
 
+    [self suppressSystemChromeForLiveViewController:controller];
     [self installStreamingGestureOnWindow:preview.window];
     BOOL changedLiveView = controller != self.cleanLiveViewController ||
                            preview != self.cleanPreviewView;
