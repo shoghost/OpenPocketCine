@@ -42,10 +42,20 @@ if grep -nE 'removeFromSuperview|makeKeyAndVisible|\.children([^A-Za-z]|$)|viewC
 fi
 grep -F '[viewController childViewControllers]' "${SOURCE_FILES[@]}" >/dev/null
 grep -F '[MCMimoCleanController.sharedController start]' "$SCRIPT_DIR/MimoStreamingEntry.m" >/dev/null
-grep -F 'requestGeometryUpdateWithPreferences:' "$SCRIPT_DIR/MimoCleanController.m" >/dev/null
-grep -F 'UIInterfaceOrientationMaskLandscape' "$SCRIPT_DIR/MimoCleanController.m" >/dev/null
-grep -F 'UIInterfaceOrientationLandscapeLeft' "$SCRIPT_DIR/build-phase2-flex.sh" >/dev/null
-grep -F 'UIInterfaceOrientationLandscapeRight' "$SCRIPT_DIR/build-phase2-flex.sh" >/dev/null
+if grep -nE 'requestGeometryUpdateWithPreferences:|attemptRotationToDeviceOrientation|supportedInterfaceOrientationsForWindow:|MCLandscapeLockActive' \
+    "$SCRIPT_DIR/MimoCleanController.m"; then
+    echo "error: Mimo orientation forcing must not be present" >&2
+    exit 1
+fi
+grep -F "Add :UISupportedInterfaceOrientations:0 string UIInterfaceOrientationLandscapeLeft" \
+    "$SCRIPT_DIR/build-phase2-flex.sh" >/dev/null
+grep -F "Add :UISupportedInterfaceOrientations:1 string UIInterfaceOrientationLandscapeRight" \
+    "$SCRIPT_DIR/build-phase2-flex.sh" >/dev/null
+if grep -F "Add :UISupportedInterfaceOrientations" "$SCRIPT_DIR/build-phase2-flex.sh" | \
+    grep -F "UIInterfaceOrientationPortrait"; then
+    echo "error: iPhone portrait orientation must not be added" >&2
+    exit 1
+fi
 if grep -F 'setValue:' "$SCRIPT_DIR/MimoCleanController.m" | grep -F 'orientation'; then
     echo "error: private UIDevice orientation forcing is forbidden" >&2
     exit 1

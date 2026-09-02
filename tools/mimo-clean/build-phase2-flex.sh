@@ -234,14 +234,12 @@ rm -rf "$NO_WATCH_APP/Watch"
     "$NO_WATCH_APP/Info.plist" 2>/dev/null || true
 /usr/libexec/PlistBuddy -c 'Add :UISupportedInterfaceOrientations array' \
     "$NO_WATCH_APP/Info.plist"
-/usr/libexec/PlistBuddy -c 'Add :UISupportedInterfaceOrientations:0 string UIInterfaceOrientationPortrait' \
+/usr/libexec/PlistBuddy -c 'Add :UISupportedInterfaceOrientations:0 string UIInterfaceOrientationLandscapeLeft' \
     "$NO_WATCH_APP/Info.plist"
-/usr/libexec/PlistBuddy -c 'Add :UISupportedInterfaceOrientations:1 string UIInterfaceOrientationLandscapeLeft' \
-    "$NO_WATCH_APP/Info.plist"
-/usr/libexec/PlistBuddy -c 'Add :UISupportedInterfaceOrientations:2 string UIInterfaceOrientationLandscapeRight' \
+/usr/libexec/PlistBuddy -c 'Add :UISupportedInterfaceOrientations:1 string UIInterfaceOrientationLandscapeRight' \
     "$NO_WATCH_APP/Info.plist"
 plutil -lint "$NO_WATCH_APP/Info.plist"
-log "phase=orientation_capability iphone_orientations=portrait,landscapeLeft,landscapeRight"
+log "phase=orientation iphone_orientations=landscapeLeft,landscapeRight"
 (
     cd "$NO_WATCH_TREE"
     /usr/bin/zip -qry -y "$NO_WATCH_IPA" Payload
@@ -268,14 +266,20 @@ FINAL_MAIN="$FINAL_APP/$EXECUTABLE_NAME"
 [[ ! -d "$FINAL_APP/Watch" ]] || { log "error=Watch directory present in final IPA"; exit 1; }
 final_orientations="$(/usr/libexec/PlistBuddy -c 'Print :UISupportedInterfaceOrientations' \
     "$FINAL_APP/Info.plist")"
-for orientation in UIInterfaceOrientationPortrait \
-                   UIInterfaceOrientationLandscapeLeft \
-                   UIInterfaceOrientationLandscapeRight; do
+for orientation in UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight; do
     grep -F "$orientation" <<< "$final_orientations" >/dev/null || {
         log "error=final Info.plist missing orientation $orientation"
         exit 1
     }
 done
+[[ "$(grep -c 'UIInterfaceOrientation' <<< "$final_orientations")" -eq 2 ]] || {
+    log "error=final Info.plist must contain exactly two iPhone orientations"
+    exit 1
+}
+if grep -F 'UIInterfaceOrientationPortrait' <<< "$final_orientations" >/dev/null; then
+    log "error=final Info.plist unexpectedly supports portrait"
+    exit 1
+fi
 [[ -d "$FINAL_APP/PlugIns/DJIBackgroundDownloadExtension.appex" ]] || {
     log "error=background extension missing in final IPA"
     exit 1

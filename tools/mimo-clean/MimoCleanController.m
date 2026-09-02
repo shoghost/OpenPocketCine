@@ -16,67 +16,13 @@ typedef NS_ENUM(NSInteger, MCCleanClassification) {
 
 static NSString *const MCUserHideClassesKey = @"MimoClean.UserHideClassNames.v1";
 
-static BOOL MCLandscapeLockActive;
-static IMP MCOriginalApplicationOrientationMaskImplementation;
-static Class MCOrientationDelegateClass;
-static IMP MCOriginalLiveViewSupportedOrientationsImplementation;
-static IMP MCOriginalLiveViewShouldAutorotateImplementation;
-static IMP MCOriginalLiveViewPreferredOrientationImplementation;
 static const void *MCStreamingGestureKey = &MCStreamingGestureKey;
 
-static UIInterfaceOrientationMask MCLiveViewSupportedOrientations(id object, SEL selector) {
-    if (MCLandscapeLockActive) return UIInterfaceOrientationMaskLandscape;
-    if (MCOriginalLiveViewSupportedOrientationsImplementation != NULL) {
-        typedef UIInterfaceOrientationMask (*Function)(id, SEL);
-        return ((Function)MCOriginalLiveViewSupportedOrientationsImplementation)(object, selector);
-    }
-    return UIInterfaceOrientationMaskAllButUpsideDown;
-}
-
-static BOOL MCLiveViewShouldAutorotate(id object, SEL selector) {
-    if (MCLandscapeLockActive) return YES;
-    if (MCOriginalLiveViewShouldAutorotateImplementation != NULL) {
-        typedef BOOL (*Function)(id, SEL);
-        return ((Function)MCOriginalLiveViewShouldAutorotateImplementation)(object, selector);
-    }
-    return YES;
-}
-
-static UIInterfaceOrientation MCLiveViewPreferredOrientation(id object, SEL selector) {
-    UIViewController *controller = (UIViewController *)object;
-    if (MCLandscapeLockActive) {
-        UIInterfaceOrientation orientation = controller.view.window.windowScene.interfaceOrientation;
-        if (orientation == UIInterfaceOrientationLandscapeLeft ||
-            orientation == UIInterfaceOrientationLandscapeRight)
-            return orientation;
-        return UIInterfaceOrientationLandscapeRight;
-    }
-    if (MCOriginalLiveViewPreferredOrientationImplementation != NULL) {
-        typedef UIInterfaceOrientation (*Function)(id, SEL);
-        return ((Function)MCOriginalLiveViewPreferredOrientationImplementation)(object, selector);
-    }
-    UIInterfaceOrientation orientation = controller.view.window.windowScene.interfaceOrientation;
-    return orientation == UIInterfaceOrientationUnknown ? UIInterfaceOrientationPortrait : orientation;
-}
-
-static UIInterfaceOrientationMask MCApplicationSupportedOrientations(
-    id delegate, SEL selector, UIApplication *application, UIWindow *window) {
-    if (MCLandscapeLockActive) return UIInterfaceOrientationMaskLandscape;
-    if (MCOriginalApplicationOrientationMaskImplementation != NULL) {
-        typedef UIInterfaceOrientationMask (*OrientationFunction)(id, SEL, UIApplication *, UIWindow *);
-        return ((OrientationFunction)MCOriginalApplicationOrientationMaskImplementation)(
-            delegate, selector, application, window);
-    }
-    return UIDevice.currentDevice.userInterfaceIdiom == UIUserInterfaceIdiomPad
-        ? UIInterfaceOrientationMaskAll
-        : UIInterfaceOrientationMaskPortrait;
-}
-
-@interface MCLandscapeOverlayViewController : UIViewController
+@interface MCKickOverlayViewController : UIViewController
 @end
 
 
-@implementation MCLandscapeOverlayViewController
+@implementation MCKickOverlayViewController
 
 - (BOOL)shouldAutorotate { return YES; }
 
@@ -112,9 +58,6 @@ static UIInterfaceOrientationMask MCApplicationSupportedOrientations(
 @property(nonatomic, strong) MCKickHUDView *kickHUD;
 @property(nonatomic, strong) MCPassthroughWindow *overlayWindow;
 @property(nonatomic, strong) UIViewController *overlayViewController;
-@property(nonatomic, weak) UIWindowScene *landscapeScene;
-@property(nonatomic, weak) UIWindow *landscapeSourceWindow;
-@property(nonatomic, assign) NSTimeInterval lastLandscapeRequestUptime;
 @property(nonatomic, assign) BOOL applicationActive;
 @property(nonatomic, assign) BOOL streamingPresentationEnabled;
 @property(nonatomic, assign) NSUInteger kickOverlayPresentationGeneration;
@@ -182,7 +125,6 @@ static UIInterfaceOrientationMask MCApplicationSupportedOrientations(
     self.kickOverlayPresentationGeneration++;
     self.overlayWindow.hidden = YES;
     [self.kickClient stop];
-    [self releaseLandscapeLockIfNeeded];
 }
 
 - (NSArray<UIWindow *> *)applicationWindows {
@@ -229,64 +171,6 @@ static UIInterfaceOrientationMask MCApplicationSupportedOrientations(
     return nil;
 }
 
-- (void)installApplicationOrientationGateIfNeeded {
-    id<UIApplicationDelegate> delegate = UIApplication.sharedApplication.delegate;
-    Class delegateClass = [delegate class];
-    if (delegateClass == Nil || delegateClass == MCOrientationDelegateClass) return;
-    SEL selector = @selector(application:supportedInterfaceOrientationsForWindow:);
-    Method inheritedMethod = class_getInstanceMethod(delegateClass, selector);
-    const char *types = inheritedMethod == NULL ? "Q@:@@" : method_getTypeEncoding(inheritedMethod);
-    IMP replacement = (IMP)MCApplicationSupportedOrientations;
-    if (class_addMethod(delegateClass, selector, replacement, types)) {
-        MCOriginalApplicationOrientationMaskImplementation =
-            inheritedMethod == NULL ? NULL : method_getImplementation(inheritedMethod);
-    } else {
-        Method ownMethod = class_getInstanceMethod(delegateClass, selector);
-        MCOriginalApplicationOrientationMaskImplementation =
-            method_setImplementation(ownMethod, replacement);
-    }
-    MCOrientationDelegateClass = delegateClass;
-}
-
-- (void)installLiveViewOrientationOverridesForController:(UIViewController *)controller {
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        Class controllerClass = controller.class;
-        struct {
-            SEL selector;
-            IMP implementation;
-            IMP *originalImplementation;
-            const char *fallbackTypes;
-        } overrides[] = {
-            {@selector(supportedInterfaceOrientations),
-             (IMP)MCLiveViewSupportedOrientations,
-             &MCOriginalLiveViewSupportedOrientationsImplementation, "Q@:"},
-            {@selector(shouldAutorotate), (IMP)MCLiveViewShouldAutorotate,
-             &MCOriginalLiveViewShouldAutorotateImplementation, "B@:"},
-            {@selector(preferredInterfaceOrientationForPresentation),
-             (IMP)MCLiveViewPreferredOrientation,
-             &MCOriginalLiveViewPreferredOrientationImplementation, "q@:"},
-        };
-        for (NSUInteger index = 0; index < sizeof(overrides) / sizeof(overrides[0]); index++) {
-            Method inheritedMethod = class_getInstanceMethod(controllerClass, overrides[index].selector);
-            const char *types = inheritedMethod == NULL
-                ? overrides[index].fallbackTypes
-                : method_getTypeEncoding(inheritedMethod);
-            IMP inheritedImplementation = inheritedMethod == NULL
-                ? NULL
-                : method_getImplementation(inheritedMethod);
-            if (!class_addMethod(controllerClass, overrides[index].selector,
-                                 overrides[index].implementation, types)) {
-                Method ownMethod = class_getInstanceMethod(controllerClass, overrides[index].selector);
-                *overrides[index].originalImplementation =
-                    method_setImplementation(ownMethod, overrides[index].implementation);
-            } else {
-                *overrides[index].originalImplementation = inheritedImplementation;
-            }
-        }
-    });
-}
-
 - (void)installStreamingGestureOnWindow:(UIWindow *)window {
     if (window == nil || objc_getAssociatedObject(window, MCStreamingGestureKey) != nil) return;
     UITapGestureRecognizer *gesture = [[UITapGestureRecognizer alloc]
@@ -324,64 +208,9 @@ static UIInterfaceOrientationMask MCApplicationSupportedOrientations(
 
     self.streamingPresentationEnabled = YES;
     [self.kickClient start];
-    [self requestLandscapeForController:controller sourceWindow:preview.window];
     [self updateKickOverlayForPreview:preview root:root];
     [self scheduleKickOverlayFrontingForPreview:preview root:root];
-    NSLog(@"[MimoClean] three-finger streaming activation: landscape and Kick HUD enabled");
-}
-
-- (void)requestLandscapeForController:(UIViewController *)controller sourceWindow:(UIWindow *)window {
-    if (controller == nil || window == nil) return;
-    [self installApplicationOrientationGateIfNeeded];
-    [self installLiveViewOrientationOverridesForController:controller];
-    MCLandscapeLockActive = YES;
-    self.landscapeSourceWindow = window;
-    if (@available(iOS 13.0, *)) self.landscapeScene = window.windowScene;
-
-    if (@available(iOS 16.0, *)) {
-        [controller setNeedsUpdateOfSupportedInterfaceOrientations];
-        [window.rootViewController setNeedsUpdateOfSupportedInterfaceOrientations];
-        UIWindowScene *scene = window.windowScene;
-        if (scene == nil) return;
-        BOOL isLandscape = UIInterfaceOrientationIsLandscape(scene.interfaceOrientation);
-        NSTimeInterval now = NSProcessInfo.processInfo.systemUptime;
-        if (isLandscape || now - self.lastLandscapeRequestUptime < 1.0) return;
-        self.lastLandscapeRequestUptime = now;
-        UIWindowSceneGeometryPreferencesIOS *preferences =
-            [[UIWindowSceneGeometryPreferencesIOS alloc]
-                initWithInterfaceOrientations:UIInterfaceOrientationMaskLandscape];
-        [scene requestGeometryUpdateWithPreferences:preferences errorHandler:^(NSError *error) {
-            NSLog(@"[MimoClean] landscape geometry request failed: %@", error);
-        }];
-    } else {
-        [UIViewController attemptRotationToDeviceOrientation];
-    }
-}
-
-- (void)releaseLandscapeLockIfNeeded {
-    if (!MCLandscapeLockActive) return;
-    UIWindowScene *scene = self.landscapeScene;
-    UIWindow *window = self.landscapeSourceWindow;
-    MCLandscapeLockActive = NO;
-    self.landscapeScene = nil;
-    self.landscapeSourceWindow = nil;
-    self.lastLandscapeRequestUptime = 0.0;
-    if (@available(iOS 16.0, *)) {
-        [window.rootViewController setNeedsUpdateOfSupportedInterfaceOrientations];
-        if (scene == nil) return;
-        UIInterfaceOrientationMask originalMask =
-            UIDevice.currentDevice.userInterfaceIdiom == UIUserInterfaceIdiomPad
-                ? UIInterfaceOrientationMaskAll
-                : UIInterfaceOrientationMaskPortrait;
-        UIWindowSceneGeometryPreferencesIOS *preferences =
-            [[UIWindowSceneGeometryPreferencesIOS alloc]
-                initWithInterfaceOrientations:originalMask];
-        [scene requestGeometryUpdateWithPreferences:preferences errorHandler:^(NSError *error) {
-            NSLog(@"[MimoClean] orientation restore request failed: %@", error);
-        }];
-    } else {
-        [UIViewController attemptRotationToDeviceOrientation];
-    }
+    NSLog(@"[MimoClean] three-finger streaming activation: Kick HUD enabled");
 }
 
 - (UIView *)findPreviewInView:(UIView *)view {
@@ -400,7 +229,6 @@ static UIInterfaceOrientationMask MCApplicationSupportedOrientations(
     if (!self.applicationActive ||
         UIApplication.sharedApplication.applicationState != UIApplicationStateActive) {
         self.overlayWindow.hidden = YES;
-        [self releaseLandscapeLockIfNeeded];
         return;
     }
     UIViewController *controller = self.cleanModeEnabled ? self.cleanLiveViewController
@@ -416,7 +244,6 @@ static UIInterfaceOrientationMask MCApplicationSupportedOrientations(
         }
         if (self.cleanModeEnabled) [self restoreAllShowingToast:NO];
         self.overlayWindow.hidden = YES;
-        [self releaseLandscapeLockIfNeeded];
         return;
     }
 
@@ -427,7 +254,6 @@ static UIInterfaceOrientationMask MCApplicationSupportedOrientations(
         if (self.cleanModeEnabled) [self restoreAllShowingToast:NO];
         [self applyCleanMode];
         if (self.streamingPresentationEnabled) {
-            [self requestLandscapeForController:controller sourceWindow:preview.window];
             [self updateKickOverlayForPreview:preview root:root];
             [self scheduleKickOverlayFrontingForPreview:preview root:root];
         }
@@ -435,11 +261,9 @@ static UIInterfaceOrientationMask MCApplicationSupportedOrientations(
     }
 
     if (self.streamingPresentationEnabled) {
-        [self requestLandscapeForController:controller sourceWindow:preview.window];
         [self updateKickOverlayForPreview:preview root:root];
     } else {
         self.overlayWindow.hidden = YES;
-        [self releaseLandscapeLockIfNeeded];
     }
 
     if (![self previewIsIntact:preview]) {
@@ -633,7 +457,7 @@ static UIInterfaceOrientationMask MCApplicationSupportedOrientations(
         if (scene == nil) return;
         if (self.overlayWindow == nil || self.overlayWindow.windowScene != scene) {
             self.overlayWindow.hidden = YES;
-            self.overlayViewController = [MCLandscapeOverlayViewController new];
+            self.overlayViewController = [MCKickOverlayViewController new];
             self.overlayViewController.view.backgroundColor = UIColor.clearColor;
             self.overlayWindow = [[MCPassthroughWindow alloc] initWithWindowScene:scene];
             self.overlayWindow.backgroundColor = UIColor.clearColor;
@@ -642,7 +466,7 @@ static UIInterfaceOrientationMask MCApplicationSupportedOrientations(
             [self.overlayViewController.view addSubview:self.kickHUD];
         }
     } else if (self.overlayWindow == nil) {
-        self.overlayViewController = [MCLandscapeOverlayViewController new];
+        self.overlayViewController = [MCKickOverlayViewController new];
         self.overlayViewController.view.backgroundColor = UIColor.clearColor;
         self.overlayWindow = [[MCPassthroughWindow alloc] initWithFrame:sourceWindow.bounds];
         self.overlayWindow.backgroundColor = UIColor.clearColor;
