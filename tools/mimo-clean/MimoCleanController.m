@@ -99,6 +99,9 @@ static UIInterfaceOrientationMask MCApplicationSupportedOrientations(
 @property(nonatomic, weak) UIWindow *landscapeSourceWindow;
 @property(nonatomic, assign) NSTimeInterval lastLandscapeRequestUptime;
 @property(nonatomic, assign) BOOL applicationActive;
+@property(nonatomic, assign) NSUInteger kickOverlayPresentationGeneration;
+- (void)updateKickOverlayForPreview:(UIView *)preview root:(UIView *)root;
+- (void)scheduleKickOverlayFrontingForPreview:(UIView *)preview root:(UIView *)root;
 @end
 
 @implementation MCMimoCleanController
@@ -156,6 +159,7 @@ static UIInterfaceOrientationMask MCApplicationSupportedOrientations(
 - (void)applicationWillResignActive:(NSNotification *)notification {
     (void)notification;
     self.applicationActive = NO;
+    self.kickOverlayPresentationGeneration++;
     self.overlayWindow.hidden = YES;
     [self releaseLandscapeLockIfNeeded];
 }
@@ -331,6 +335,7 @@ static UIInterfaceOrientationMask MCApplicationSupportedOrientations(
     UIView *preview = self.cleanModeEnabled ? self.cleanPreviewView
                                             : (root == nil ? nil : [self findPreviewInView:root]);
     if (controller == nil || root == nil || preview == nil || preview.window == nil) {
+        self.kickOverlayPresentationGeneration++;
         if (self.cleanModeEnabled) [self restoreAllShowingToast:NO];
         self.overlayWindow.hidden = YES;
         [self releaseLandscapeLockIfNeeded];
@@ -338,16 +343,20 @@ static UIInterfaceOrientationMask MCApplicationSupportedOrientations(
     }
 
     [self requestLandscapeForController:controller sourceWindow:preview.window];
-    // Kick HUD follows LiveView presence, independently of Clean UI suppression/restoration.
-    [self updateKickOverlayForPreview:preview root:root];
-
     BOOL changedLiveView = controller != self.cleanLiveViewController ||
                            preview != self.cleanPreviewView;
     if (changedLiveView) {
         if (self.cleanModeEnabled) [self restoreAllShowingToast:NO];
         [self applyCleanMode];
+        // Present the independent Kick overlay after Mimo has applied its initial Clean/layout
+        // changes. Reassert it briefly while the asynchronous landscape transition settles.
+        [self updateKickOverlayForPreview:preview root:root];
+        [self scheduleKickOverlayFrontingForPreview:preview root:root];
         return;
     }
+
+    // Kick HUD follows LiveView presence, independently of Clean UI suppression/restoration.
+    [self updateKickOverlayForPreview:preview root:root];
 
     if (![self previewIsIntact:preview]) {
         [self restoreAllShowingToast:NO];
@@ -568,6 +577,27 @@ static UIInterfaceOrientationMask MCApplicationSupportedOrientations(
               previewFrameInRoot:previewInWindow
              interfaceOrientation:interfaceOrientation];
     self.overlayWindow.hidden = NO;
+}
+
+- (void)scheduleKickOverlayFrontingForPreview:(UIView *)preview root:(UIView *)root {
+    NSUInteger generation = ++self.kickOverlayPresentationGeneration;
+    NSArray<NSNumber *> *delays = @[@0.15, @0.50, @1.00];
+    for (NSNumber *delay in delays) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                     (int64_t)(delay.doubleValue * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            if (generation != self.kickOverlayPresentationGeneration ||
+                !self.applicationActive ||
+                UIApplication.sharedApplication.applicationState != UIApplicationStateActive ||
+                preview.window == nil || root.window == nil || preview.window != root.window)
+                return;
+            [self updateKickOverlayForPreview:preview root:root];
+            // Re-showing a non-key overlay restores its z-order after Mimo's LiveView/rotation
+            // transition without taking key-window status or touching the camera hierarchy.
+            self.overlayWindow.hidden = YES;
+            self.overlayWindow.hidden = NO;
+        });
+    }
 }
 
 - (void)restoreAllShowingToast:(BOOL)showToast {
