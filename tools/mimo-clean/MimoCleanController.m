@@ -19,22 +19,28 @@ static NSString *const MCUserHideClassesKey = @"MimoClean.UserHideClassNames.v1"
 static const void *MCStreamingGestureKey = &MCStreamingGestureKey;
 
 @interface MCKickOverlayViewController : UIViewController
+@property(nonatomic, weak) UIViewController *orientationSourceViewController;
 @end
 
 
 @implementation MCKickOverlayViewController
 
-- (BOOL)shouldAutorotate { return YES; }
+- (BOOL)shouldAutorotate {
+    UIViewController *source = self.orientationSourceViewController;
+    return source == nil ? YES : source.shouldAutorotate;
+}
 
 - (UIInterfaceOrientationMask)supportedInterfaceOrientations {
-    return UIInterfaceOrientationMaskLandscape;
+    UIViewController *source = self.orientationSourceViewController;
+    return source == nil ? UIInterfaceOrientationMaskAllButUpsideDown
+                         : source.supportedInterfaceOrientations;
 }
 
 - (UIInterfaceOrientation)preferredInterfaceOrientationForPresentation {
+    UIViewController *source = self.orientationSourceViewController;
+    if (source != nil) return source.preferredInterfaceOrientationForPresentation;
     UIInterfaceOrientation orientation = self.view.window.windowScene.interfaceOrientation;
-    return orientation == UIInterfaceOrientationLandscapeLeft
-        ? UIInterfaceOrientationLandscapeLeft
-        : UIInterfaceOrientationLandscapeRight;
+    return orientation == UIInterfaceOrientationUnknown ? UIInterfaceOrientationPortrait : orientation;
 }
 
 @end
@@ -58,7 +64,6 @@ static const void *MCStreamingGestureKey = &MCStreamingGestureKey;
 @property(nonatomic, strong) MCKickHUDView *kickHUD;
 @property(nonatomic, strong) MCPassthroughWindow *overlayWindow;
 @property(nonatomic, strong) UIViewController *overlayViewController;
-@property(nonatomic, assign) BOOL applicationActive;
 @property(nonatomic, assign) BOOL streamingPresentationEnabled;
 @property(nonatomic, assign) NSUInteger kickOverlayPresentationGeneration;
 - (void)installStreamingGestureOnWindow:(UIWindow *)window;
@@ -86,7 +91,6 @@ static const void *MCStreamingGestureKey = &MCStreamingGestureKey;
         _kickClient = [MCKickClient new];
         _kickHUD = [[MCKickHUDView alloc] initWithFrame:CGRectZero];
         _kickClient.delegate = _kickHUD;
-        _applicationActive = UIApplication.sharedApplication.applicationState == UIApplicationStateActive;
     }
     return self;
 }
@@ -99,12 +103,6 @@ static const void *MCStreamingGestureKey = &MCStreamingGestureKey;
                    name:UIApplicationDidBecomeActiveNotification object:nil];
     [center addObserver:self selector:@selector(applicationWillResignActive:)
                    name:UIApplicationWillResignActiveNotification object:nil];
-    if (@available(iOS 13.0, *)) {
-        [center addObserver:self selector:@selector(applicationDidBecomeActive:)
-                       name:UISceneDidActivateNotification object:nil];
-        [center addObserver:self selector:@selector(applicationWillResignActive:)
-                       name:UISceneWillDeactivateNotification object:nil];
-    }
     self.monitorTimer = [NSTimer timerWithTimeInterval:0.5 target:self
                                               selector:@selector(streamingLayoutTick:)
                                               userInfo:nil repeats:YES];
@@ -114,13 +112,11 @@ static const void *MCStreamingGestureKey = &MCStreamingGestureKey;
 
 - (void)applicationDidBecomeActive:(NSNotification *)notification {
     (void)notification;
-    self.applicationActive = YES;
     [self streamingLayoutTick:self.monitorTimer];
 }
 
 - (void)applicationWillResignActive:(NSNotification *)notification {
     (void)notification;
-    self.applicationActive = NO;
     self.streamingPresentationEnabled = NO;
     self.kickOverlayPresentationGeneration++;
     self.overlayWindow.hidden = YES;
@@ -184,6 +180,7 @@ static const void *MCStreamingGestureKey = &MCStreamingGestureKey;
     [window addGestureRecognizer:gesture];
     objc_setAssociatedObject(window, MCStreamingGestureKey, gesture,
                              OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    NSLog(@"[MimoClean] three-finger Kick gesture installed on window=%@", window);
 }
 
 - (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer
@@ -195,7 +192,9 @@ static const void *MCStreamingGestureKey = &MCStreamingGestureKey;
 }
 
 - (void)activateStreamingPresentation:(UITapGestureRecognizer *)gesture {
-    if (gesture.state != UIGestureRecognizerStateRecognized || !self.applicationActive) return;
+    if (gesture.state != UIGestureRecognizerStateRecognized ||
+        UIApplication.sharedApplication.applicationState != UIApplicationStateActive)
+        return;
     UIViewController *controller = self.cleanModeEnabled ? self.cleanLiveViewController
                                                          : [self liveViewController];
     UIView *root = self.cleanModeEnabled ? self.cleanRootView : controller.view;
@@ -226,8 +225,7 @@ static const void *MCStreamingGestureKey = &MCStreamingGestureKey;
 - (void)streamingLayoutTick:(NSTimer *)timer {
     (void)timer;
     NSAssert(NSThread.isMainThread, @"Mimo streaming layout must run on the main thread");
-    if (!self.applicationActive ||
-        UIApplication.sharedApplication.applicationState != UIApplicationStateActive) {
+    if (UIApplication.sharedApplication.applicationState != UIApplicationStateActive) {
         self.overlayWindow.hidden = YES;
         return;
     }
@@ -457,7 +455,9 @@ static const void *MCStreamingGestureKey = &MCStreamingGestureKey;
         if (scene == nil) return;
         if (self.overlayWindow == nil || self.overlayWindow.windowScene != scene) {
             self.overlayWindow.hidden = YES;
-            self.overlayViewController = [MCKickOverlayViewController new];
+            MCKickOverlayViewController *overlayController = [MCKickOverlayViewController new];
+            overlayController.orientationSourceViewController = sourceWindow.rootViewController;
+            self.overlayViewController = overlayController;
             self.overlayViewController.view.backgroundColor = UIColor.clearColor;
             self.overlayWindow = [[MCPassthroughWindow alloc] initWithWindowScene:scene];
             self.overlayWindow.backgroundColor = UIColor.clearColor;
@@ -466,7 +466,9 @@ static const void *MCStreamingGestureKey = &MCStreamingGestureKey;
             [self.overlayViewController.view addSubview:self.kickHUD];
         }
     } else if (self.overlayWindow == nil) {
-        self.overlayViewController = [MCKickOverlayViewController new];
+        MCKickOverlayViewController *overlayController = [MCKickOverlayViewController new];
+        overlayController.orientationSourceViewController = sourceWindow.rootViewController;
+        self.overlayViewController = overlayController;
         self.overlayViewController.view.backgroundColor = UIColor.clearColor;
         self.overlayWindow = [[MCPassthroughWindow alloc] initWithFrame:sourceWindow.bounds];
         self.overlayWindow.backgroundColor = UIColor.clearColor;
@@ -474,10 +476,12 @@ static const void *MCStreamingGestureKey = &MCStreamingGestureKey;
         self.overlayWindow.rootViewController = self.overlayViewController;
         [self.overlayViewController.view addSubview:self.kickHUD];
     }
+    ((MCKickOverlayViewController *)self.overlayViewController).orientationSourceViewController =
+        sourceWindow.rootViewController;
     self.overlayWindow.frame = sourceWindow.bounds;
     self.overlayViewController.view.frame = self.overlayWindow.bounds;
     CGRect previewInWindow = [preview convertRect:preview.bounds toView:sourceWindow];
-    UIInterfaceOrientation interfaceOrientation = UIInterfaceOrientationLandscapeRight;
+    UIInterfaceOrientation interfaceOrientation = UIInterfaceOrientationLandscapeLeft;
     if (@available(iOS 13.0, *))
         interfaceOrientation = sourceWindow.windowScene.interfaceOrientation;
     [self.kickHUD updateForBounds:self.overlayViewController.view.bounds
@@ -495,7 +499,6 @@ static const void *MCStreamingGestureKey = &MCStreamingGestureKey;
                                      (int64_t)(delay.doubleValue * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
             if (generation != self.kickOverlayPresentationGeneration ||
-                !self.applicationActive ||
                 UIApplication.sharedApplication.applicationState != UIApplicationStateActive ||
                 preview.window == nil || root.window == nil || preview.window != root.window)
                 return;

@@ -95,7 +95,6 @@
 @property(nonatomic, strong) CAGradientLayer *chatFadeMask;
 @property(nonatomic, strong) NSMutableArray<MCKickMessage *> *messages;
 @property(nonatomic, assign) MCKickConnectionState connectionState;
-@property(nonatomic, assign) UIInterfaceOrientation lastLandscapeOrientation;
 @property(nonatomic, strong, nullable) NSNumber *viewerCount;
 @property(nonatomic, assign) BOOL streamLive;
 @property(nonatomic, copy, nullable) NSString *stateDetail;
@@ -122,8 +121,6 @@
         self.clipsToBounds = NO;
         _messages = [NSMutableArray array];
         _connectionState = MCKickConnectionStateConnecting;
-        _lastLandscapeOrientation = UIInterfaceOrientationLandscapeRight;
-
         _viewerBadgeView = [UIView new];
         _viewerBadgeView.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.88];
         _viewerBadgeView.layer.cornerRadius = 5.0;
@@ -174,10 +171,9 @@
 
 - (UIInterfaceOrientation)landscapeOrientationForInterfaceOrientation:
     (UIInterfaceOrientation)interfaceOrientation {
-    if (interfaceOrientation == UIInterfaceOrientationLandscapeLeft ||
-        interfaceOrientation == UIInterfaceOrientationLandscapeRight)
-        self.lastLandscapeOrientation = interfaceOrientation;
-    return self.lastLandscapeOrientation;
+    (void)interfaceOrientation;
+    // Canonical streaming orientation: the side/power-button edge is always the top edge.
+    return UIInterfaceOrientationLandscapeLeft;
 }
 
 - (void)applyLandscapeCanvasForBounds:(CGRect)bounds
@@ -213,6 +209,8 @@
      previewFrameInRoot:(CGRect)previewFrame
     interfaceOrientation:(UIInterfaceOrientation)interfaceOrientation {
     NSAssert(NSThread.isMainThread, @"Kick HUD layout must run on the main thread");
+    // HUD placement intentionally uses a landscape screen canvas rather than the preview
+    // view's transformed geometry. The supported streaming hold has the power-button edge up.
     (void)previewFrame;
     [self applyLandscapeCanvasForBounds:bounds interfaceOrientation:interfaceOrientation];
     static const CGFloat MCKickHUDEdgePadding = 10.0;
@@ -239,10 +237,10 @@
         right = MAX(right, safeArea.top);
         bottom = MAX(bottom, safeArea.right);
     }
+
     [self layoutViewerBadgeAtLeft:left top:top];
 
-    // Chat is bottom-anchored on a canonical landscape canvas. It spans the canvas width,
-    // so long text can naturally continue from the black band over the preview.
+    // Chat grows upward from the lower-left of the same canonical landscape canvas.
     CGFloat chatHeight = floor(canvasHeight * (2.0 / 3.0));
     self.tableView.frame = CGRectMake(left,
                                       canvasHeight - bottom - chatHeight,
