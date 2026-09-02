@@ -19,27 +19,44 @@ static NSString *const MCUserHideClassesKey = @"MimoClean.UserHideClassNames.v1"
 static BOOL MCLandscapeLockActive;
 static IMP MCOriginalApplicationOrientationMaskImplementation;
 static Class MCOrientationDelegateClass;
+static IMP MCOriginalLiveViewSupportedOrientationsImplementation;
+static IMP MCOriginalLiveViewShouldAutorotateImplementation;
+static IMP MCOriginalLiveViewPreferredOrientationImplementation;
+static const void *MCStreamingGestureKey = &MCStreamingGestureKey;
 
 static UIInterfaceOrientationMask MCLiveViewSupportedOrientations(id object, SEL selector) {
-    (void)object;
-    (void)selector;
-    return UIInterfaceOrientationMaskLandscape;
+    if (MCLandscapeLockActive) return UIInterfaceOrientationMaskLandscape;
+    if (MCOriginalLiveViewSupportedOrientationsImplementation != NULL) {
+        typedef UIInterfaceOrientationMask (*Function)(id, SEL);
+        return ((Function)MCOriginalLiveViewSupportedOrientationsImplementation)(object, selector);
+    }
+    return UIInterfaceOrientationMaskAllButUpsideDown;
 }
 
 static BOOL MCLiveViewShouldAutorotate(id object, SEL selector) {
-    (void)object;
-    (void)selector;
+    if (MCLandscapeLockActive) return YES;
+    if (MCOriginalLiveViewShouldAutorotateImplementation != NULL) {
+        typedef BOOL (*Function)(id, SEL);
+        return ((Function)MCOriginalLiveViewShouldAutorotateImplementation)(object, selector);
+    }
     return YES;
 }
 
 static UIInterfaceOrientation MCLiveViewPreferredOrientation(id object, SEL selector) {
-    (void)selector;
     UIViewController *controller = (UIViewController *)object;
+    if (MCLandscapeLockActive) {
+        UIInterfaceOrientation orientation = controller.view.window.windowScene.interfaceOrientation;
+        if (orientation == UIInterfaceOrientationLandscapeLeft ||
+            orientation == UIInterfaceOrientationLandscapeRight)
+            return orientation;
+        return UIInterfaceOrientationLandscapeRight;
+    }
+    if (MCOriginalLiveViewPreferredOrientationImplementation != NULL) {
+        typedef UIInterfaceOrientation (*Function)(id, SEL);
+        return ((Function)MCOriginalLiveViewPreferredOrientationImplementation)(object, selector);
+    }
     UIInterfaceOrientation orientation = controller.view.window.windowScene.interfaceOrientation;
-    if (orientation == UIInterfaceOrientationLandscapeLeft ||
-        orientation == UIInterfaceOrientationLandscapeRight)
-        return orientation;
-    return UIInterfaceOrientationLandscapeRight;
+    return orientation == UIInterfaceOrientationUnknown ? UIInterfaceOrientationPortrait : orientation;
 }
 
 static UIInterfaceOrientationMask MCApplicationSupportedOrientations(
@@ -76,7 +93,7 @@ static UIInterfaceOrientationMask MCApplicationSupportedOrientations(
 
 @end
 
-@interface MCMimoCleanController ()
+@interface MCMimoCleanController () <UIGestureRecognizerDelegate>
 @property(nonatomic, strong) NSMapTable<UIView *, NSNumber *> *originalHiddenStates;
 @property(nonatomic, strong) NSMapTable<UIView *, NSNumber *> *classifications;
 @property(nonatomic, strong) NSMutableSet<NSString *> *userHideClassNames;
@@ -99,7 +116,10 @@ static UIInterfaceOrientationMask MCApplicationSupportedOrientations(
 @property(nonatomic, weak) UIWindow *landscapeSourceWindow;
 @property(nonatomic, assign) NSTimeInterval lastLandscapeRequestUptime;
 @property(nonatomic, assign) BOOL applicationActive;
+@property(nonatomic, assign) BOOL streamingPresentationEnabled;
 @property(nonatomic, assign) NSUInteger kickOverlayPresentationGeneration;
+- (void)installStreamingGestureOnWindow:(UIWindow *)window;
+- (void)activateStreamingPresentation:(UITapGestureRecognizer *)gesture;
 - (void)updateKickOverlayForPreview:(UIView *)preview root:(UIView *)root;
 - (void)scheduleKickOverlayFrontingForPreview:(UIView *)preview root:(UIView *)root;
 @end
@@ -131,7 +151,6 @@ static UIInterfaceOrientationMask MCApplicationSupportedOrientations(
 - (void)start {
     NSAssert(NSThread.isMainThread, @"MimoClean must start on the main thread");
     if (self.monitorTimer != nil) return;
-    [self.kickClient start];
     NSNotificationCenter *center = NSNotificationCenter.defaultCenter;
     [center addObserver:self selector:@selector(applicationDidBecomeActive:)
                    name:UIApplicationDidBecomeActiveNotification object:nil];
@@ -159,8 +178,10 @@ static UIInterfaceOrientationMask MCApplicationSupportedOrientations(
 - (void)applicationWillResignActive:(NSNotification *)notification {
     (void)notification;
     self.applicationActive = NO;
+    self.streamingPresentationEnabled = NO;
     self.kickOverlayPresentationGeneration++;
     self.overlayWindow.hidden = YES;
+    [self.kickClient stop];
     [self releaseLandscapeLockIfNeeded];
 }
 
@@ -234,26 +255,79 @@ static UIInterfaceOrientationMask MCApplicationSupportedOrientations(
         struct {
             SEL selector;
             IMP implementation;
+            IMP *originalImplementation;
             const char *fallbackTypes;
         } overrides[] = {
             {@selector(supportedInterfaceOrientations),
-             (IMP)MCLiveViewSupportedOrientations, "Q@:"},
-            {@selector(shouldAutorotate), (IMP)MCLiveViewShouldAutorotate, "B@:"},
+             (IMP)MCLiveViewSupportedOrientations,
+             &MCOriginalLiveViewSupportedOrientationsImplementation, "Q@:"},
+            {@selector(shouldAutorotate), (IMP)MCLiveViewShouldAutorotate,
+             &MCOriginalLiveViewShouldAutorotateImplementation, "B@:"},
             {@selector(preferredInterfaceOrientationForPresentation),
-             (IMP)MCLiveViewPreferredOrientation, "q@:"},
+             (IMP)MCLiveViewPreferredOrientation,
+             &MCOriginalLiveViewPreferredOrientationImplementation, "q@:"},
         };
         for (NSUInteger index = 0; index < sizeof(overrides) / sizeof(overrides[0]); index++) {
             Method inheritedMethod = class_getInstanceMethod(controllerClass, overrides[index].selector);
             const char *types = inheritedMethod == NULL
                 ? overrides[index].fallbackTypes
                 : method_getTypeEncoding(inheritedMethod);
+            IMP inheritedImplementation = inheritedMethod == NULL
+                ? NULL
+                : method_getImplementation(inheritedMethod);
             if (!class_addMethod(controllerClass, overrides[index].selector,
                                  overrides[index].implementation, types)) {
                 Method ownMethod = class_getInstanceMethod(controllerClass, overrides[index].selector);
-                method_setImplementation(ownMethod, overrides[index].implementation);
+                *overrides[index].originalImplementation =
+                    method_setImplementation(ownMethod, overrides[index].implementation);
+            } else {
+                *overrides[index].originalImplementation = inheritedImplementation;
             }
         }
     });
+}
+
+- (void)installStreamingGestureOnWindow:(UIWindow *)window {
+    if (window == nil || objc_getAssociatedObject(window, MCStreamingGestureKey) != nil) return;
+    UITapGestureRecognizer *gesture = [[UITapGestureRecognizer alloc]
+        initWithTarget:self action:@selector(activateStreamingPresentation:)];
+    gesture.numberOfTapsRequired = 1;
+    gesture.numberOfTouchesRequired = 3;
+    gesture.cancelsTouchesInView = NO;
+    gesture.delaysTouchesBegan = NO;
+    gesture.delaysTouchesEnded = NO;
+    gesture.delegate = self;
+    [window addGestureRecognizer:gesture];
+    objc_setAssociatedObject(window, MCStreamingGestureKey, gesture,
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer
+        shouldRecognizeSimultaneouslyWithGestureRecognizer:
+            (UIGestureRecognizer *)otherGestureRecognizer {
+    (void)gestureRecognizer;
+    (void)otherGestureRecognizer;
+    return YES;
+}
+
+- (void)activateStreamingPresentation:(UITapGestureRecognizer *)gesture {
+    if (gesture.state != UIGestureRecognizerStateRecognized || !self.applicationActive) return;
+    UIViewController *controller = self.cleanModeEnabled ? self.cleanLiveViewController
+                                                         : [self liveViewController];
+    UIView *root = self.cleanModeEnabled ? self.cleanRootView : controller.view;
+    UIView *preview = self.cleanModeEnabled ? self.cleanPreviewView
+                                            : (root == nil ? nil : [self findPreviewInView:root]);
+    if (controller == nil || root == nil || preview == nil || preview.window == nil) {
+        NSLog(@"[MimoClean] three-finger streaming activation ignored: LiveView unavailable");
+        return;
+    }
+
+    self.streamingPresentationEnabled = YES;
+    [self.kickClient start];
+    [self requestLandscapeForController:controller sourceWindow:preview.window];
+    [self updateKickOverlayForPreview:preview root:root];
+    [self scheduleKickOverlayFrontingForPreview:preview root:root];
+    NSLog(@"[MimoClean] three-finger streaming activation: landscape and Kick HUD enabled");
 }
 
 - (void)requestLandscapeForController:(UIViewController *)controller sourceWindow:(UIWindow *)window {
@@ -336,27 +410,37 @@ static UIInterfaceOrientationMask MCApplicationSupportedOrientations(
                                             : (root == nil ? nil : [self findPreviewInView:root]);
     if (controller == nil || root == nil || preview == nil || preview.window == nil) {
         self.kickOverlayPresentationGeneration++;
+        if (self.streamingPresentationEnabled) {
+            self.streamingPresentationEnabled = NO;
+            [self.kickClient stop];
+        }
         if (self.cleanModeEnabled) [self restoreAllShowingToast:NO];
         self.overlayWindow.hidden = YES;
         [self releaseLandscapeLockIfNeeded];
         return;
     }
 
-    [self requestLandscapeForController:controller sourceWindow:preview.window];
+    [self installStreamingGestureOnWindow:preview.window];
     BOOL changedLiveView = controller != self.cleanLiveViewController ||
                            preview != self.cleanPreviewView;
     if (changedLiveView) {
         if (self.cleanModeEnabled) [self restoreAllShowingToast:NO];
         [self applyCleanMode];
-        // Present the independent Kick overlay after Mimo has applied its initial Clean/layout
-        // changes. Reassert it briefly while the asynchronous landscape transition settles.
-        [self updateKickOverlayForPreview:preview root:root];
-        [self scheduleKickOverlayFrontingForPreview:preview root:root];
+        if (self.streamingPresentationEnabled) {
+            [self requestLandscapeForController:controller sourceWindow:preview.window];
+            [self updateKickOverlayForPreview:preview root:root];
+            [self scheduleKickOverlayFrontingForPreview:preview root:root];
+        }
         return;
     }
 
-    // Kick HUD follows LiveView presence, independently of Clean UI suppression/restoration.
-    [self updateKickOverlayForPreview:preview root:root];
+    if (self.streamingPresentationEnabled) {
+        [self requestLandscapeForController:controller sourceWindow:preview.window];
+        [self updateKickOverlayForPreview:preview root:root];
+    } else {
+        self.overlayWindow.hidden = YES;
+        [self releaseLandscapeLockIfNeeded];
+    }
 
     if (![self previewIsIntact:preview]) {
         [self restoreAllShowingToast:NO];
