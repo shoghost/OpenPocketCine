@@ -98,6 +98,7 @@ static UIInterfaceOrientationMask MCApplicationSupportedOrientations(
 @property(nonatomic, weak) UIWindowScene *landscapeScene;
 @property(nonatomic, weak) UIWindow *landscapeSourceWindow;
 @property(nonatomic, assign) NSTimeInterval lastLandscapeRequestUptime;
+@property(nonatomic, assign) BOOL applicationActive;
 @end
 
 @implementation MCMimoCleanController
@@ -119,6 +120,7 @@ static UIInterfaceOrientationMask MCApplicationSupportedOrientations(
         _kickClient = [MCKickClient new];
         _kickHUD = [[MCKickHUDView alloc] initWithFrame:CGRectZero];
         _kickClient.delegate = _kickHUD;
+        _applicationActive = UIApplication.sharedApplication.applicationState == UIApplicationStateActive;
     }
     return self;
 }
@@ -130,9 +132,13 @@ static UIInterfaceOrientationMask MCApplicationSupportedOrientations(
     NSNotificationCenter *center = NSNotificationCenter.defaultCenter;
     [center addObserver:self selector:@selector(applicationDidBecomeActive:)
                    name:UIApplicationDidBecomeActiveNotification object:nil];
+    [center addObserver:self selector:@selector(applicationWillResignActive:)
+                   name:UIApplicationWillResignActiveNotification object:nil];
     if (@available(iOS 13.0, *)) {
         [center addObserver:self selector:@selector(applicationDidBecomeActive:)
                        name:UISceneDidActivateNotification object:nil];
+        [center addObserver:self selector:@selector(applicationWillResignActive:)
+                       name:UISceneWillDeactivateNotification object:nil];
     }
     self.monitorTimer = [NSTimer timerWithTimeInterval:0.5 target:self
                                               selector:@selector(streamingLayoutTick:)
@@ -143,7 +149,15 @@ static UIInterfaceOrientationMask MCApplicationSupportedOrientations(
 
 - (void)applicationDidBecomeActive:(NSNotification *)notification {
     (void)notification;
+    self.applicationActive = YES;
     [self streamingLayoutTick:self.monitorTimer];
+}
+
+- (void)applicationWillResignActive:(NSNotification *)notification {
+    (void)notification;
+    self.applicationActive = NO;
+    self.overlayWindow.hidden = YES;
+    [self releaseLandscapeLockIfNeeded];
 }
 
 - (NSArray<UIWindow *> *)applicationWindows {
@@ -176,9 +190,16 @@ static UIInterfaceOrientationMask MCApplicationSupportedOrientations(
 
 - (UIViewController *)liveViewController {
     for (UIWindow *window in self.applicationWindows.reverseObjectEnumerator) {
+        if (window.hidden || window.alpha <= 0.0) continue;
+        if (@available(iOS 13.0, *)) {
+            if (window.windowScene.activationState != UISceneActivationStateForegroundActive)
+                continue;
+        }
         UIViewController *match = [self findViewControllerNamed:@"DJIHG2X0FPVViewController"
                                              fromViewController:window.rootViewController];
-        if (match != nil) return match;
+        UIView *view = match.viewIfLoaded;
+        if (match != nil && view.window == window && !view.hidden && view.alpha > 0.0)
+            return match;
     }
     return nil;
 }
@@ -298,6 +319,12 @@ static UIInterfaceOrientationMask MCApplicationSupportedOrientations(
 - (void)streamingLayoutTick:(NSTimer *)timer {
     (void)timer;
     NSAssert(NSThread.isMainThread, @"Mimo streaming layout must run on the main thread");
+    if (!self.applicationActive ||
+        UIApplication.sharedApplication.applicationState != UIApplicationStateActive) {
+        self.overlayWindow.hidden = YES;
+        [self releaseLandscapeLockIfNeeded];
+        return;
+    }
     UIViewController *controller = self.cleanModeEnabled ? self.cleanLiveViewController
                                                          : [self liveViewController];
     UIView *root = self.cleanModeEnabled ? self.cleanRootView : controller.view;
